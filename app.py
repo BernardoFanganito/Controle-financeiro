@@ -33,7 +33,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ==========================================
-# FUNÇÕES DE FORMATAÇÃO E CONVERSÃO (PADRÃO BRASIL)
+# FUNÇÕES DE FORMATAÇÃO E CONVERSÃO
 # ==========================================
 def formatar_moeda(valor):
     if pd.isna(valor) or valor == "": return "R$ 0,00"
@@ -42,43 +42,30 @@ def formatar_moeda(valor):
     return f"R$ {valor_str}"
 
 def apenas_numero_br(valor):
-    """Transforma float para string editável tipo 1.250,00"""
     if pd.isna(valor) or valor == "": return "0,00"
     valor_str = f"{float(valor):,.2f}"
     return valor_str.replace(",", "X").replace(".", ",").replace("X", ".")
 
 def texto_para_float(valor_str):
-    """Entende o que o brasileiro digita (1.250,50 ou 150,00 ou 1500) e transforma em float puro para o banco"""
     if pd.isna(valor_str) or valor_str is None: return 0.0
     if isinstance(valor_str, (float, int)): return float(valor_str)
-    
     v = str(valor_str).replace("R$", "").strip()
     if not v: return 0.0
-    
     qtd_pontos = v.count(".")
     qtd_virgulas = v.count(",")
-    
     if qtd_pontos > 0 and qtd_virgulas > 0:
         pos_ponto = v.rfind(".")
         pos_virgula = v.rfind(",")
-        if pos_virgula > pos_ponto: # Ex: 1.250,50
-            v = v.replace(".", "").replace(",", ".")
-        else: # Ex: 1,250.50 (digitou invertido)
-            v = v.replace(",", "")
-    elif qtd_virgulas == 1 and qtd_pontos == 0: # Ex: 150,50
-        v = v.replace(",", ".")
-    elif qtd_pontos > 1 and qtd_virgulas == 0: # Ex: 1.500.000 sem decimal
-        v = v.replace(".", "")
-    elif qtd_virgulas > 1 and qtd_pontos == 0:
-        v = v.replace(",", "")
-        
-    try:
-        return float(v)
-    except:
-        return 0.0
+        if pos_virgula > pos_ponto: v = v.replace(".", "").replace(",", ".")
+        else: v = v.replace(",", "")
+    elif qtd_virgulas == 1 and qtd_pontos == 0: v = v.replace(",", ".")
+    elif qtd_pontos > 1 and qtd_virgulas == 0: v = v.replace(".", "")
+    elif qtd_virgulas > 1 and qtd_pontos == 0: v = v.replace(",", "")
+    try: return float(v)
+    except: return 0.0
 
 # ==========================================
-# SISTEMA DE LOGIN (COM PERSISTÊNCIA)
+# SISTEMA DE LOGIN
 # ==========================================
 if st.session_state.get('conta_id') is None:
     if "cid" in st.query_params:
@@ -150,26 +137,34 @@ with st.sidebar:
         st.rerun()
 
 st.title("💸 Controle Financeiro")
-aba_dashboard, aba_add_manual, aba_renda, aba_pdf = st.tabs([
-    "📊 Visão e Edição", "✍️ Registrar Compra", "💰 Meus Salários", "📄 Importar Fatura"
+
+# NOVAS ABAS (Aba de Categorias adicionada no final)
+aba_dashboard, aba_add_manual, aba_renda, aba_pdf, aba_categorias = st.tabs([
+    "📊 Visão e Edição", "✍️ Registrar Compra", "💰 Salários", "📄 Fatura PDF", "⚙️ Categorias"
 ])
 
-# Busca dados do Banco
+# Busca dados gerais do Banco
 resp_gastos = supabase.table("gastos").select("*").eq("conta_id", CONTA_ID).execute()
 resp_rendas = supabase.table("receitas").select("*").eq("conta_id", CONTA_ID).execute()
+resp_categorias = supabase.table("categorias").select("*").eq("conta_id", CONTA_ID).execute()
+
 df_gastos = pd.DataFrame(resp_gastos.data) if resp_gastos.data else pd.DataFrame()
 df_rendas = pd.DataFrame(resp_rendas.data) if resp_rendas.data else pd.DataFrame()
 
-# Cria a lista global de categorias
-categorias_banco = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
+# SISTEMA INTELIGENTE DE CATEGORIAS
+if not resp_categorias.data:
+    # Se a conta não tiver nenhuma categoria (primeiro login), cria as padrões
+    padroes = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
+    for p in padroes:
+        supabase.table("categorias").insert({"conta_id": CONTA_ID, "nome": p}).execute()
+    resp_categorias = supabase.table("categorias").select("*").eq("conta_id", CONTA_ID).execute()
+
+df_categorias = pd.DataFrame(resp_categorias.data)
+categorias_banco = df_categorias['nome'].tolist() if not df_categorias.empty else []
+
 if not df_gastos.empty:
     df_gastos['data_compra'] = pd.to_datetime(df_gastos['data_compra'])
     df_gastos['mes_ano'] = df_gastos['data_compra'].dt.strftime('%Y-%m')
-    cats_usadas = df_gastos['categoria'].dropna().unique().tolist()
-    for c in cats_usadas:
-        if c not in categorias_banco:
-            categorias_banco.append(c)
-
 if not df_rendas.empty:
     df_rendas['mes_referencia'] = pd.to_datetime(df_rendas['mes_referencia'])
     df_rendas['mes_ano'] = df_rendas['mes_referencia'].dt.strftime('%Y-%m')
@@ -230,11 +225,8 @@ with aba_dashboard:
                 st.bar_chart(graf_cat, x="categoria", y="valor")
 
         st.write("### ✏️ Histórico (Dê 2 cliques para Editar, ou selecione a linha e aperte 'Delete')")
-        
         df_exibicao = df_filtrado[['id', 'data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'parcela_atual', 'total_parcelas']].copy()
         df_exibicao['data_compra'] = df_exibicao['data_compra'].dt.date
-        
-        # Converte para string BR para edição livre na tabela
         df_exibicao['valor'] = df_exibicao['valor'].apply(apenas_numero_br)
         df_exibicao['valor_total'] = df_exibicao['valor_total'].apply(apenas_numero_br)
         
@@ -244,8 +236,8 @@ with aba_dashboard:
                 "id": None, 
                 "data_compra": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição"),
-                "valor": st.column_config.TextColumn("Valor Parcela (R$)"), # TEXTO LIVRE BRASILEIRO
-                "valor_total": st.column_config.TextColumn("Total Compra (R$)"), # TEXTO LIVRE BRASILEIRO
+                "valor": st.column_config.TextColumn("Valor Parcela (R$)"), 
+                "valor_total": st.column_config.TextColumn("Total Compra (R$)"),
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=categorias_banco, required=True),
                 "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
                 "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
@@ -265,11 +257,8 @@ with aba_dashboard:
                 for row_idx, mudancas in alteracoes["edited_rows"].items():
                     id_editar = df_exibicao.iloc[row_idx]['id']
                     if 'data_compra' in mudancas: mudancas['data_compra'] = mudancas['data_compra'] + "T00:00:00"
-                    
-                    # Converte de volta de "1.500,50" para float 1500.50 antes de salvar
                     if 'valor' in mudancas: mudancas['valor'] = texto_para_float(mudancas['valor'])
                     if 'valor_total' in mudancas: mudancas['valor_total'] = texto_para_float(mudancas['valor_total'])
-                        
                     supabase.table("gastos").update(mudancas).eq("id", int(id_editar)).execute()
                 fez_algo = True
             if fez_algo:
@@ -284,35 +273,25 @@ with aba_dashboard:
 with aba_add_manual:
     st.subheader("Registrar Nova Compra")
     
-    opcoes_cat_manual = categorias_banco.copy()
-    opcoes_cat_manual.append("+ Criar Nova Categoria")
-
     desc = st.text_input("O que foi comprado? *", key="g_desc")
     data_compra = st.date_input("Data da Compra *", value=date.today())
     comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
     
-    cat_selecionada = st.selectbox("Categoria *", opcoes_cat_manual)
-    if cat_selecionada == "+ Criar Nova Categoria":
-        categoria_final = st.text_input("Digite o nome da sua nova Categoria *", key="g_cat_nova")
-    else:
-        categoria_final = cat_selecionada
+    # AGORA USA EXATAMENTE AS CATEGORIAS DO BANCO (SEM O CAMPO "+ CRIAR" AQUI)
+    cat_selecionada = st.selectbox("Categoria *", categorias_banco)
     
     tipo_pagamento = st.radio("Forma de Pagamento:", ["À vista", "Parcelada"])
-    
     if tipo_pagamento == "À vista":
-        # CAMPO DE TEXTO LIVRE PARA MOEDA
-        val_vista_txt = st.text_input("Valor da Compra (R$) *", value="0,00", key="g_val_vista", help="Pode digitar com vírgula. Ex: 1.250,50")
+        val_vista_txt = st.text_input("Valor da Compra (R$) *", value="0,00", key="g_val_vista")
         valor_total_compra = texto_para_float(val_vista_txt)
         valor_parcela = valor_total_compra
         total_parcelas = 1
         parcela_atual = 1
     else:
         col_vt, col_vp = st.columns(2)
-        # CAMPOS DE TEXTO LIVRE PARA MOEDA
-        val_tot_txt = col_vt.text_input("Valor TOTAL da Compra (R$) *", value="0,00", key="g_val_parc_tot", help="Ex: 1500,00")
+        val_tot_txt = col_vt.text_input("Valor TOTAL da Compra (R$) *", value="0,00", key="g_val_parc_tot")
         valor_total_compra = texto_para_float(val_tot_txt)
-        
-        val_parc_txt = col_vp.text_input("Valor da PARCELA Mensal (R$) *", value="0,00", key="g_val_parc_mensal", help="Ex: 150,50")
+        val_parc_txt = col_vp.text_input("Valor da PARCELA Mensal (R$) *", value="0,00", key="g_val_parc_mensal")
         valor_parcela = texto_para_float(val_parc_txt)
         
         col_p1, col_p2 = st.columns(2)
@@ -325,19 +304,17 @@ with aba_add_manual:
     if st.button("Salvar Gasto", type="primary"):
         if not desc.strip() or valor_total_compra <= 0:
             st.error("Erro: Preencha a descrição e o valor!")
-        elif cat_selecionada == "+ Criar Nova Categoria" and not categoria_final.strip():
-            st.error("Erro: Você esqueceu de digitar o nome da nova categoria!")
         else:
             novo_gasto = {
                 "conta_id": CONTA_ID, "descricao": desc,
                 "valor": float(valor_parcela), "valor_total": float(valor_total_compra),
-                "categoria": categoria_final, "comprador": comprador,
+                "categoria": cat_selecionada, "comprador": comprador,
                 "data_compra": data_compra.isoformat(), "recorrente": recorrente,
                 "parcela_atual": int(parcela_atual), "total_parcelas": int(total_parcelas)
             }
             supabase.table("gastos").insert(novo_gasto).execute()
             
-            for key in ['g_desc', 'g_val_vista', 'g_val_parc_tot', 'g_val_parc_mensal', 'g_cat_nova']:
+            for key in ['g_desc', 'g_val_vista', 'g_val_parc_tot', 'g_val_parc_mensal']:
                 if key in st.session_state: del st.session_state[key]
             st.success("Gasto salvo com sucesso!")
             st.rerun()
@@ -350,9 +327,7 @@ with aba_renda:
     with st.form("form_renda", clear_on_submit=True):
         usuario_renda = st.selectbox("Quem recebeu?", OPCOES_COMPRADOR[:2])
         mes_renda = st.date_input("Data do Recebimento", value=date.today())
-        
-        # TEXTO LIVRE PARA MOEDA
-        valor_renda_txt = st.text_input("Valor Recebido (R$)", value="0,00", help="Ex: 3.500,00")
+        valor_renda_txt = st.text_input("Valor Recebido (R$)", value="0,00")
         valor_renda = texto_para_float(valor_renda_txt)
         
         if st.form_submit_button("Salvar Salário") and valor_renda > 0:
@@ -376,7 +351,7 @@ with aba_renda:
                 "id": None, 
                 "mes_referencia": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), 
                 "usuario": st.column_config.SelectboxColumn("Pessoa", options=OPCOES_COMPRADOR[:2], required=True), 
-                "valor": st.column_config.TextColumn("Valor (R$)") # TEXTO LIVRE
+                "valor": st.column_config.TextColumn("Valor (R$)") 
             }, hide_index=True
         )
         if st.button("Salvar Alterações de Salário"):
@@ -391,9 +366,7 @@ with aba_renda:
                 for idx, mudancas in alt_r["edited_rows"].items():
                     id_upd = df_r_exib.iloc[idx]['id']
                     if 'mes_referencia' in mudancas: mudancas['mes_referencia'] = mudancas['mes_referencia'] + "T00:00:00"
-                    
                     if 'valor' in mudancas: mudancas['valor'] = texto_para_float(mudancas['valor'])
-                        
                     supabase.table("receitas").update(mudancas).eq("id", int(id_upd)).execute()
                 fez_algo_r = True
             if fez_algo_r:
@@ -418,22 +391,18 @@ with aba_pdf:
                     prompt = """
                     Leia a fatura de cartão anexada. Extraia APENAS as compras realizadas.
                     Ignore pagamentos de fatura, estornos, saldos anteriores ou encargos.
-                    
-                    Retorne EXCLUSIVAMENTE um array JSON. 
-                    Cada objeto deve conter:
-                    - "data_compra": (string, formato YYYY-MM-DD. Tente identificar a data exata da compra na fatura. Presuma o ano atual se não houver)
+                    Retorne EXCLUSIVAMENTE um array JSON. Cada objeto deve conter:
+                    - "data_compra": (string, formato YYYY-MM-DD)
                     - "descricao": (string, nome do estabelecimento)
                     - "valor": (numero decimal, parcela do mês. Ex: 45.90)
-                    - "valor_total": (numero decimal, total da compra. Se não tiver, igual ao valor)
+                    - "valor_total": (numero decimal, total da compra)
                     - "categoria": (string)
                     - "parcela_atual": (inteiro)
                     - "total_parcelas": (inteiro)
                     """
-                    
                     modelos_para_testar = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash']
                     resposta_ia = None
                     ultimo_erro = None
-                    
                     for nome_modelo in modelos_para_testar:
                         try:
                             mod = genai.GenerativeModel(nome_modelo)
@@ -451,8 +420,7 @@ with aba_pdf:
                     
                     for c in compras_extraidas:
                         c['comprador'] = dono_fatura
-                        if not c.get("data_compra"):
-                            c["data_compra"] = data_fatura.isoformat()
+                        if not c.get("data_compra"): c["data_compra"] = data_fatura.isoformat()
                     
                     st.session_state['fatura_em_revisao'] = compras_extraidas
                     st.session_state['fatura_data_base'] = data_fatura
@@ -463,7 +431,7 @@ with aba_pdf:
                     
     else:
         st.subheader("🔍 Validação da Fatura")
-        st.write("Dê dois cliques nas células para **alterar as Categorias ou os Compradores selecionando nas listas**, ajuste datas/valores ou exclua (Delete) o que não quiser salvar.")
+        st.write("Dê dois cliques nas células para **alterar as Categorias ou os Compradores**, ajuste valores ou exclua (Delete) o que não quiser salvar.")
         
         df_rev = pd.DataFrame(st.session_state['fatura_em_revisao'])
         
@@ -479,7 +447,6 @@ with aba_pdf:
         df_rev['data_compra'] = pd.to_datetime(df_rev['data_compra'], errors='coerce').dt.date
         df_rev['data_compra'] = df_rev['data_compra'].fillna(st.session_state['fatura_data_base'])
         
-        # Converte para string BR para edição livre
         df_rev['valor'] = df_rev['valor'].apply(apenas_numero_br)
         df_rev['valor_total'] = df_rev['valor_total'].apply(apenas_numero_br)
         
@@ -488,21 +455,17 @@ with aba_pdf:
             if cat not in opcoes_cat_fatura: opcoes_cat_fatura.append(cat)
                 
         fatura_editada = st.data_editor(
-            df_rev, 
-            key="editor_fatura", 
-            use_container_width=True, 
-            num_rows="dynamic",
+            df_rev, key="editor_fatura", use_container_width=True, num_rows="dynamic",
             column_config={
                 "data_compra": st.column_config.DateColumn("Data da Compra", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição da Compra"),
-                "valor": st.column_config.TextColumn("Valor PARCELA (R$)"), # TEXTO LIVRE BRASILEIRO
-                "valor_total": st.column_config.TextColumn("Valor TOTAL (R$)"), # TEXTO LIVRE BRASILEIRO
+                "valor": st.column_config.TextColumn("Valor PARCELA (R$)"),
+                "valor_total": st.column_config.TextColumn("Valor TOTAL (R$)"),
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=opcoes_cat_fatura, required=True),
-                "comprador": st.column_config.SelectboxColumn("De quem é a conta?", options=OPCOES_COMPRADOR, required=True),
+                "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
                 "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
                 "total_parcelas": st.column_config.NumberColumn("Total Parcelas", min_value=1),
-            }, 
-            hide_index=True
+            }, hide_index=True
         )
         
         st.divider()
@@ -512,22 +475,14 @@ with aba_pdf:
             compras_finais = fatura_editada.to_dict('records')
             for c in compras_finais:
                 data_final = c["data_compra"].isoformat() if hasattr(c["data_compra"], 'isoformat') else str(c["data_compra"])
-                
-                # Converte o texto que o usuário digitou (ex: "1.200,50") de volta para float na hora de salvar
                 valor_p = texto_para_float(c["valor"])
                 valor_t = texto_para_float(c.get("valor_total", c["valor"]))
-                
                 supabase.table("gastos").insert({
-                    "conta_id": CONTA_ID,
-                    "descricao": c["descricao"],
-                    "valor": float(valor_p), 
-                    "valor_total": float(valor_t), 
-                    "categoria": c["categoria"], 
-                    "comprador": c["comprador"],
-                    "data_compra": data_final,
-                    "recorrente": False,
-                    "parcela_atual": int(c.get("parcela_atual", 1)),
-                    "total_parcelas": int(c.get("total_parcelas", 1))
+                    "conta_id": CONTA_ID, "descricao": c["descricao"],
+                    "valor": float(valor_p), "valor_total": float(valor_t), 
+                    "categoria": c["categoria"], "comprador": c["comprador"],
+                    "data_compra": data_final, "recorrente": False,
+                    "parcela_atual": int(c.get("parcela_atual", 1)), "total_parcelas": int(c.get("total_parcelas", 1))
                 }).execute()
             
             del st.session_state['fatura_em_revisao']
@@ -539,3 +494,55 @@ with aba_pdf:
             del st.session_state['fatura_em_revisao']
             del st.session_state['fatura_data_base']
             st.rerun()
+
+# ------------------------------------------
+# ABA 5: GERENCIAR CATEGORIAS (A Cereja do Bolo)
+# ------------------------------------------
+with aba_categorias:
+    st.subheader("⚙️ Suas Categorias")
+    st.write("Adicione novas categorias ou exclua aquelas que você nunca usa. Elas ficarão salvas no seu perfil.")
+    
+    # Formulário rápido para adicionar
+    with st.form("form_nova_cat", clear_on_submit=True):
+        nova_cat = st.text_input("Criar Nova Categoria:")
+        if st.form_submit_button("Salvar Categoria"):
+            if nova_cat.strip() and nova_cat.strip() not in categorias_banco:
+                supabase.table("categorias").insert({"conta_id": CONTA_ID, "nome": nova_cat.strip()}).execute()
+                st.success("Categoria adicionada com sucesso!")
+                st.rerun()
+            elif nova_cat.strip() in categorias_banco:
+                st.warning("Essa categoria já existe na sua lista!")
+    
+    st.divider()
+    
+    st.write("### ✏️ Excluir Categorias")
+    st.write("Selecione a caixinha à esquerda da categoria e aperte a tecla **'Delete'** para apagá-la da sua lista.")
+    
+    if not df_categorias.empty:
+        df_cat_exib = df_categorias[['id', 'nome']].copy()
+        edit_cat = st.data_editor(
+            df_cat_exib, key="editor_categorias", num_rows="dynamic", use_container_width=True,
+            column_config={
+                "id": None, 
+                "nome": st.column_config.TextColumn("Nome da Categoria", required=True)
+            }, hide_index=True
+        )
+        if st.button("Confirmar Alterações de Categorias"):
+            alt_c = st.session_state.editor_categorias
+            fez_algo_c = False
+            # Exclusão
+            if alt_c.get("deleted_rows"):
+                for idx in alt_c["deleted_rows"]:
+                    id_del = df_cat_exib.iloc[idx]['id']
+                    supabase.table("categorias").delete().eq("id", int(id_del)).execute()
+                fez_algo_c = True
+            # Edição (renomear)
+            if alt_c.get("edited_rows"):
+                for idx, mudancas in alt_c["edited_rows"].items():
+                    id_upd = df_cat_exib.iloc[idx]['id']
+                    supabase.table("categorias").update(mudancas).eq("id", int(id_upd)).execute()
+                fez_algo_c = True
+                
+            if fez_algo_c:
+                st.success("Lista de categorias atualizada!")
+                st.rerun()
