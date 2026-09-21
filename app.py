@@ -138,7 +138,6 @@ with st.sidebar:
 
 st.title("💸 Controle Financeiro")
 
-# NOVAS ABAS (Aba de Categorias adicionada no final)
 aba_dashboard, aba_add_manual, aba_renda, aba_pdf, aba_categorias = st.tabs([
     "📊 Visão e Edição", "✍️ Registrar Compra", "💰 Salários", "📄 Fatura PDF", "⚙️ Categorias"
 ])
@@ -153,7 +152,6 @@ df_rendas = pd.DataFrame(resp_rendas.data) if resp_rendas.data else pd.DataFrame
 
 # SISTEMA INTELIGENTE DE CATEGORIAS
 if not resp_categorias.data:
-    # Se a conta não tiver nenhuma categoria (primeiro login), cria as padrões
     padroes = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
     for p in padroes:
         supabase.table("categorias").insert({"conta_id": CONTA_ID, "nome": p}).execute()
@@ -224,7 +222,8 @@ with aba_dashboard:
                 graf_cat = df_filtrado.groupby('categoria', as_index=False)['valor'].sum()
                 st.bar_chart(graf_cat, x="categoria", y="valor")
 
-        st.write("### ✏️ Histórico (Dê 2 cliques para Editar, ou selecione a linha e aperte 'Delete')")
+        st.write("### ✏️ Histórico")
+        st.write("*(Dica: Para ordenar, clique no título da coluna. Para excluir, selecione a linha e aperte 'Delete')*")
         df_exibicao = df_filtrado[['id', 'data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'parcela_atual', 'total_parcelas']].copy()
         df_exibicao['data_compra'] = df_exibicao['data_compra'].dt.date
         df_exibicao['valor'] = df_exibicao['valor'].apply(apenas_numero_br)
@@ -276,11 +275,10 @@ with aba_add_manual:
     desc = st.text_input("O que foi comprado? *", key="g_desc")
     data_compra = st.date_input("Data da Compra *", value=date.today())
     comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
-    
-    # AGORA USA EXATAMENTE AS CATEGORIAS DO BANCO (SEM O CAMPO "+ CRIAR" AQUI)
     cat_selecionada = st.selectbox("Categoria *", categorias_banco)
     
     tipo_pagamento = st.radio("Forma de Pagamento:", ["À vista", "Parcelada"])
+    
     if tipo_pagamento == "À vista":
         val_vista_txt = st.text_input("Valor da Compra (R$) *", value="0,00", key="g_val_vista")
         valor_total_compra = texto_para_float(val_vista_txt)
@@ -379,7 +377,6 @@ with aba_renda:
 with aba_pdf:
     if 'fatura_em_revisao' not in st.session_state:
         st.subheader("Importar Fatura")
-        st.write("A IA vai procurar a data exata de cada compra. A 'Data base' abaixo será usada só para compras onde a IA não achar a data.")
         dono_fatura = st.radio("Essa fatura é primariamente de quem?", OPCOES_COMPRADOR, key="dono_fat")
         data_fatura = st.date_input("Data base dessa fatura", value=date.today())
         arquivo_pdf = st.file_uploader("Escolha o arquivo PDF", type=["pdf"])
@@ -394,7 +391,7 @@ with aba_pdf:
                     Retorne EXCLUSIVAMENTE um array JSON. Cada objeto deve conter:
                     - "data_compra": (string, formato YYYY-MM-DD)
                     - "descricao": (string, nome do estabelecimento)
-                    - "valor": (numero decimal, parcela do mês. Ex: 45.90)
+                    - "valor": (numero decimal, parcela do mês)
                     - "valor_total": (numero decimal, total da compra)
                     - "categoria": (string)
                     - "parcela_atual": (inteiro)
@@ -429,6 +426,27 @@ with aba_pdf:
                     st.error("Erro na leitura. Certifique-se de que é um PDF válido.")
                     st.error(f"Erro técnico: {e}")
                     
+        st.divider()
+        st.subheader("🗑️ Desfazer Importações Recentes")
+        if not df_gastos.empty and 'lote_importacao' in df_gastos.columns:
+            df_com_lote = df_gastos[df_gastos['lote_importacao'].notna()]
+            if not df_com_lote.empty:
+                lotes_validos = df_com_lote['lote_importacao'].unique()
+                st.write("Selecione um lote de fatura que você importou caso precise apagá-lo por completo:")
+                lote_selecionado = st.selectbox("Lotes disponíveis", lotes_validos)
+                
+                qtd_lote = len(df_com_lote[df_com_lote['lote_importacao'] == lote_selecionado])
+                st.write(f"Essa importação contém **{qtd_lote} lançamentos**.")
+                
+                if st.button("🚨 Excluir esta Fatura Inteira", type="primary"):
+                    supabase.table("gastos").delete().eq("conta_id", CONTA_ID).eq("lote_importacao", lote_selecionado).execute()
+                    st.success("Fatura desfeita com sucesso!")
+                    st.rerun()
+            else:
+                st.info("Nenhuma fatura importada recentemente.")
+        else:
+            st.info("O sistema de desfazer importações está ativo! A partir da sua próxima importação, os lotes aparecerão aqui.")
+                    
     else:
         st.subheader("🔍 Validação da Fatura")
         st.write("Dê dois cliques nas células para **alterar as Categorias ou os Compradores**, ajuste valores ou exclua (Delete) o que não quiser salvar.")
@@ -455,24 +473,33 @@ with aba_pdf:
             if cat not in opcoes_cat_fatura: opcoes_cat_fatura.append(cat)
                 
         fatura_editada = st.data_editor(
-            df_rev, key="editor_fatura", use_container_width=True, num_rows="dynamic",
+            df_rev, 
+            key="editor_fatura", 
+            use_container_width=True, 
+            num_rows="dynamic",
             column_config={
                 "data_compra": st.column_config.DateColumn("Data da Compra", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição da Compra"),
                 "valor": st.column_config.TextColumn("Valor PARCELA (R$)"),
                 "valor_total": st.column_config.TextColumn("Valor TOTAL (R$)"),
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=opcoes_cat_fatura, required=True),
-                "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
+                "comprador": st.column_config.SelectboxColumn("De quem é a conta?", options=OPCOES_COMPRADOR, required=True),
                 "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
                 "total_parcelas": st.column_config.NumberColumn("Total Parcelas", min_value=1),
-            }, hide_index=True
+            }, 
+            hide_index=True
         )
         
         st.divider()
-        col_btn1, col_btn2 = st.columns(2)
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
         
-        if col_btn1.button("✅ Confirmar e Salvar no Sistema", type="primary"):
+        # BOTÃO 1: CONFIRMAR E SALVAR
+        if col_btn1.button("✅ Confirmar e Salvar", type="primary"):
             compras_finais = fatura_editada.to_dict('records')
+            
+            # Gera um Lote de Identificação para poder apagar tudo junto depois
+            lote_id = f"Fatura_{datetime.now().strftime('%d-%m-%Y_%H:%M:%S')}"
+            
             for c in compras_finais:
                 data_final = c["data_compra"].isoformat() if hasattr(c["data_compra"], 'isoformat') else str(c["data_compra"])
                 valor_p = texto_para_float(c["valor"])
@@ -482,27 +509,64 @@ with aba_pdf:
                     "valor": float(valor_p), "valor_total": float(valor_t), 
                     "categoria": c["categoria"], "comprador": c["comprador"],
                     "data_compra": data_final, "recorrente": False,
-                    "parcela_atual": int(c.get("parcela_atual", 1)), "total_parcelas": int(c.get("total_parcelas", 1))
+                    "parcela_atual": int(c.get("parcela_atual", 1)), "total_parcelas": int(c.get("total_parcelas", 1)),
+                    "lote_importacao": lote_id  # <--- Salva o código do Lote
                 }).execute()
             
             del st.session_state['fatura_em_revisao']
             del st.session_state['fatura_data_base']
-            st.success("Todas as compras validadas foram salvas com sucesso!")
+            st.success("Fatura salva com sucesso!")
             st.rerun()
             
-        if col_btn2.button("❌ Cancelar Importação"):
+        # BOTÃO 2: PADRONIZAR CATEGORIAS REPETIDAS (A MÁGICA)
+        if col_btn2.button("🪄 Padronizar repetições"):
+            alt_f = st.session_state.editor_fatura
+            fatura_atual = st.session_state['fatura_em_revisao']
+            
+            mapa_edicoes = {}
+            if alt_f.get("edited_rows"):
+                for idx_str, mudancas in alt_f["edited_rows"].items():
+                    if "categoria" in mudancas or "comprador" in mudancas:
+                        desc = fatura_atual[int(idx_str)]["descricao"]
+                        mapa_edicoes[desc] = mudancas
+                        
+            if mapa_edicoes:
+                mudou_algo = False
+                for i, item in enumerate(fatura_atual):
+                    # Primeiro, atualiza a fatura com todas as mudanças que o usuário já tinha feito na tela
+                    if str(i) in alt_f.get("edited_rows", {}):
+                        item.update(alt_f["edited_rows"][str(i)])
+                    
+                    # Agora, busca se tem uma padronização pra essa descrição
+                    desc = item.get("descricao", "")
+                    if desc in mapa_edicoes:
+                        if "categoria" in mapa_edicoes[desc] and item.get("categoria") != mapa_edicoes[desc]["categoria"]:
+                            item["categoria"] = mapa_edicoes[desc]["categoria"]
+                            mudou_algo = True
+                        if "comprador" in mapa_edicoes[desc] and item.get("comprador") != mapa_edicoes[desc]["comprador"]:
+                            item["comprador"] = mapa_edicoes[desc]["comprador"]
+                            mudou_algo = True
+                            
+                if mudou_algo:
+                    st.session_state['fatura_em_revisao'] = fatura_atual
+                    del st.session_state["editor_fatura"] # Força a tela a recarregar
+                    st.rerun()
+            else:
+                st.warning("Você precisa alterar a Categoria ou o Comprador de pelo menos um item repetido primeiro!")
+
+        # BOTÃO 3: CANCELAR
+        if col_btn3.button("❌ Cancelar Importação"):
             del st.session_state['fatura_em_revisao']
             del st.session_state['fatura_data_base']
             st.rerun()
 
 # ------------------------------------------
-# ABA 5: GERENCIAR CATEGORIAS (A Cereja do Bolo)
+# ABA 5: GERENCIAR CATEGORIAS
 # ------------------------------------------
 with aba_categorias:
     st.subheader("⚙️ Suas Categorias")
     st.write("Adicione novas categorias ou exclua aquelas que você nunca usa. Elas ficarão salvas no seu perfil.")
     
-    # Formulário rápido para adicionar
     with st.form("form_nova_cat", clear_on_submit=True):
         nova_cat = st.text_input("Criar Nova Categoria:")
         if st.form_submit_button("Salvar Categoria"):
@@ -516,7 +580,7 @@ with aba_categorias:
     st.divider()
     
     st.write("### ✏️ Excluir Categorias")
-    st.write("Selecione a caixinha à esquerda da categoria e aperte a tecla **'Delete'** para apagá-la da sua lista.")
+    st.write("Selecione a caixinha à esquerda da categoria e aperte a tecla **'Delete'** para apagá-la.")
     
     if not df_categorias.empty:
         df_cat_exib = df_categorias[['id', 'nome']].copy()
@@ -530,13 +594,11 @@ with aba_categorias:
         if st.button("Confirmar Alterações de Categorias"):
             alt_c = st.session_state.editor_categorias
             fez_algo_c = False
-            # Exclusão
             if alt_c.get("deleted_rows"):
                 for idx in alt_c["deleted_rows"]:
                     id_del = df_cat_exib.iloc[idx]['id']
                     supabase.table("categorias").delete().eq("id", int(id_del)).execute()
                 fez_algo_c = True
-            # Edição (renomear)
             if alt_c.get("edited_rows"):
                 for idx, mudancas in alt_c["edited_rows"].items():
                     id_upd = df_cat_exib.iloc[idx]['id']
