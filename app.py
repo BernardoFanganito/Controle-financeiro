@@ -6,21 +6,26 @@ import pandas as pd
 from datetime import datetime, date
 
 # ==========================================
-# FUNÇÃO DE FORMATAÇÃO BRASILEIRA (R$ 1.255,50)
-# ==========================================
-def formatar_moeda(valor):
-    if pd.isna(valor):
-        return "R$ 0,00"
-    # Formata com 2 casas decimais e separador de milhares americano
-    valor_str = f"{valor:,.2f}"
-    # Inverte os pontos e vírgulas para o padrão brasileiro
-    valor_str = valor_str.replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"R$ {valor_str}"
-
-# ==========================================
-# CONFIGURAÇÕES INICIAIS
+# CONFIGURAÇÕES INICIAIS E REMOÇÃO DE MARCA D'ÁGUA
 # ==========================================
 st.set_page_config(page_title="Controle Financeiro", page_icon="💸", layout="wide")
+
+# CSS para esconder a marca d'água do Streamlit e limpar links da URL
+esconder_estilos_streamlit = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    [data-testid="stHeader"] {display: none !important;}
+    [data-testid="stToolbar"] {display: none !important;}
+    [data-testid="stDecoration"] {display: none !important;}
+    [data-testid="stStatusWidget"] {display: none !important;}
+    .stAppDeployButton {display: none !important;}
+    /* Esconde as âncoras que geram textos feios na URL */
+    a.header-anchor {display: none !important;}
+    </style>
+"""
+st.markdown(esconder_estilos_streamlit, unsafe_allow_html=True)
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
@@ -30,7 +35,17 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ==========================================
-# SISTEMA DE LOGIN (COM MEMÓRIA / PERSISTÊNCIA)
+# FUNÇÃO DE FORMATAÇÃO BRASILEIRA (R$ 1.255,50)
+# ==========================================
+def formatar_moeda(valor):
+    if pd.isna(valor):
+        return "R$ 0,00"
+    valor_str = f"{valor:,.2f}"
+    valor_str = valor_str.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {valor_str}"
+
+# ==========================================
+# SISTEMA DE LOGIN (COM PERSISTÊNCIA)
 # ==========================================
 if st.session_state.get('conta_id') is None:
     if "cid" in st.query_params:
@@ -112,7 +127,7 @@ resp_rendas = supabase.table("receitas").select("*").eq("conta_id", CONTA_ID).ex
 df_gastos = pd.DataFrame(resp_gastos.data) if resp_gastos.data else pd.DataFrame()
 df_rendas = pd.DataFrame(resp_rendas.data) if resp_rendas.data else pd.DataFrame()
 
-# Cria a lista global de categorias puxando as já cadastradas
+# Cria a lista global de categorias
 categorias_banco = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
 if not df_gastos.empty:
     df_gastos['data_compra'] = pd.to_datetime(df_gastos['data_compra'])
@@ -153,8 +168,6 @@ with aba_dashboard:
         
         st.subheader("Resumo do Período Filtrado")
         c1, c2, c3 = st.columns(3)
-        
-        # APLICANDO A FORMATAÇÃO BRASILEIRA AQUI
         c1.metric("Total Gasto (da visão)", formatar_moeda(total_gasto))
         
         if not df_rendas.empty:
@@ -164,11 +177,9 @@ with aba_dashboard:
             else: total_renda = df_rendas_filtro[df_rendas_filtro['usuario'] == visao]['valor'].sum()
             
             saldo = total_renda - total_gasto
-            # Para manter a cor verde (positivo) ou vermelha (negativo) na setinha
             delta_str = formatar_moeda(saldo).replace("R$ ", "")
             if saldo < 0: delta_str = "-" + delta_str.replace("-", "")
             
-            # APLICANDO A FORMATAÇÃO BRASILEIRA AQUI
             c2.metric("Renda Total do Período", formatar_moeda(total_renda))
             c3.metric("Saldo Sobrando", formatar_moeda(saldo), delta=delta_str)
         st.divider()
@@ -259,8 +270,6 @@ with aba_add_manual:
         col_p1, col_p2 = st.columns(2)
         total_parcelas = col_p2.number_input("Quantidade Total de Parcelas *", min_value=2, value=2)
         parcela_atual = col_p1.number_input("Qual parcela é essa? *", min_value=1, value=1)
-        
-        # APLICANDO A FORMATAÇÃO BRASILEIRA NA MENSAGEM INFORMATIVA
         st.info(f"O valor de cada parcela será: **{formatar_moeda(valor_parcela)}**")
         
     recorrente = st.checkbox("Compra recorrente mensal (Fixo)?")
