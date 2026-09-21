@@ -6,6 +6,18 @@ import pandas as pd
 from datetime import datetime, date
 
 # ==========================================
+# FUNÇÃO DE FORMATAÇÃO BRASILEIRA (R$ 1.255,50)
+# ==========================================
+def formatar_moeda(valor):
+    if pd.isna(valor):
+        return "R$ 0,00"
+    # Formata com 2 casas decimais e separador de milhares americano
+    valor_str = f"{valor:,.2f}"
+    # Inverte os pontos e vírgulas para o padrão brasileiro
+    valor_str = valor_str.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {valor_str}"
+
+# ==========================================
 # CONFIGURAÇÕES INICIAIS
 # ==========================================
 st.set_page_config(page_title="Controle Financeiro", page_icon="💸", layout="wide")
@@ -141,7 +153,9 @@ with aba_dashboard:
         
         st.subheader("Resumo do Período Filtrado")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Gasto (da visão)", f"R$ {total_gasto:.2f}")
+        
+        # APLICANDO A FORMATAÇÃO BRASILEIRA AQUI
+        c1.metric("Total Gasto (da visão)", formatar_moeda(total_gasto))
         
         if not df_rendas.empty:
             df_rendas_filtro = df_rendas.copy()
@@ -149,8 +163,14 @@ with aba_dashboard:
             if visao == "Visão Geral (Casal)": total_renda = df_rendas_filtro['valor'].sum()
             else: total_renda = df_rendas_filtro[df_rendas_filtro['usuario'] == visao]['valor'].sum()
             
-            c2.metric("Renda Total do Período", f"R$ {total_renda:.2f}")
-            c3.metric("Saldo Sobrando", f"R$ {(total_renda - total_gasto):.2f}", delta=float(total_renda - total_gasto))
+            saldo = total_renda - total_gasto
+            # Para manter a cor verde (positivo) ou vermelha (negativo) na setinha
+            delta_str = formatar_moeda(saldo).replace("R$ ", "")
+            if saldo < 0: delta_str = "-" + delta_str.replace("-", "")
+            
+            # APLICANDO A FORMATAÇÃO BRASILEIRA AQUI
+            c2.metric("Renda Total do Período", formatar_moeda(total_renda))
+            c3.metric("Saldo Sobrando", formatar_moeda(saldo), delta=delta_str)
         st.divider()
 
         col_graf1, col_graf2 = st.columns(2)
@@ -178,7 +198,6 @@ with aba_dashboard:
                 "descricao": st.column_config.TextColumn("Descrição"),
                 "valor": st.column_config.NumberColumn("Valor Parcela (R$)", format="%.2f"),
                 "valor_total": st.column_config.NumberColumn("Total Compra (R$)", format="%.2f"),
-                # DROPDOWNS APLICADOS NO DASHBOARD:
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=categorias_banco, required=True),
                 "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
                 "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
@@ -197,8 +216,7 @@ with aba_dashboard:
             if alteracoes.get("edited_rows"):
                 for row_idx, mudancas in alteracoes["edited_rows"].items():
                     id_editar = df_exibicao.iloc[row_idx]['id']
-                    if 'data_compra' in mudancas: # Tratamento para não quebrar a data
-                         mudancas['data_compra'] = mudancas['data_compra'] + "T00:00:00"
+                    if 'data_compra' in mudancas: mudancas['data_compra'] = mudancas['data_compra'] + "T00:00:00"
                     supabase.table("gastos").update(mudancas).eq("id", int(id_editar)).execute()
                 fez_algo = True
             if fez_algo:
@@ -241,6 +259,9 @@ with aba_add_manual:
         col_p1, col_p2 = st.columns(2)
         total_parcelas = col_p2.number_input("Quantidade Total de Parcelas *", min_value=2, value=2)
         parcela_atual = col_p1.number_input("Qual parcela é essa? *", min_value=1, value=1)
+        
+        # APLICANDO A FORMATAÇÃO BRASILEIRA NA MENSAGEM INFORMATIVA
+        st.info(f"O valor de cada parcela será: **{formatar_moeda(valor_parcela)}**")
         
     recorrente = st.checkbox("Compra recorrente mensal (Fixo)?")
     
@@ -290,7 +311,6 @@ with aba_renda:
             column_config={
                 "id": None, 
                 "mes_referencia": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), 
-                # DROPDOWN NO SALÁRIO TAMBÉM:
                 "usuario": st.column_config.SelectboxColumn("Pessoa", options=OPCOES_COMPRADOR[:2], required=True), 
                 "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f")
             }, hide_index=True
@@ -314,7 +334,7 @@ with aba_renda:
                 st.rerun()
 
 # ------------------------------------------
-# ABA 4: IMPORTAR FATURA (Com Datas Inteligentes e Dropdowns)
+# ABA 4: IMPORTAR FATURA
 # ------------------------------------------
 with aba_pdf:
     if 'fatura_em_revisao' not in st.session_state:
@@ -328,7 +348,6 @@ with aba_pdf:
             with st.spinner("A IA está analisando o PDF da sua fatura e lendo as datas..."):
                 try:
                     pdf_bytes = arquivo_pdf.getvalue()
-                    # PROMPT MELHORADO COM DATA DA COMPRA
                     prompt = """
                     Leia a fatura de cartão anexada. Extraia APENAS as compras realizadas.
                     Ignore pagamentos de fatura, estornos, saldos anteriores ou encargos.
@@ -363,9 +382,8 @@ with aba_pdf:
                     texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
                     compras_extraidas = json.loads(texto_json)
                     
-                    # Trata os dados extras que vieram da IA antes de ir pra tela
                     for c in compras_extraidas:
-                        c['comprador'] = dono_fatura # O valor inicial do radio
+                        c['comprador'] = dono_fatura
                         if not c.get("data_compra"):
                             c["data_compra"] = data_fatura.isoformat()
                     
@@ -382,7 +400,6 @@ with aba_pdf:
         
         df_rev = pd.DataFrame(st.session_state['fatura_em_revisao'])
         
-        # Garante a existência das colunas
         col_nec = ['data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'parcela_atual', 'total_parcelas']
         for col in col_nec:
             if col not in df_rev.columns:
@@ -392,16 +409,13 @@ with aba_pdf:
                 elif col == 'data_compra': df_rev[col] = st.session_state['fatura_data_base']
                 else: df_rev[col] = ""
                 
-        # Força as datas para o tipo certo do Streamlit
         df_rev['data_compra'] = pd.to_datetime(df_rev['data_compra'], errors='coerce').dt.date
         df_rev['data_compra'] = df_rev['data_compra'].fillna(st.session_state['fatura_data_base'])
         
-        # Cria lista de opções de categorias juntando as do banco com as inventadas pela IA
         opcoes_cat_fatura = categorias_banco.copy()
         for cat in df_rev['categoria'].dropna().unique():
             if cat not in opcoes_cat_fatura: opcoes_cat_fatura.append(cat)
                 
-        # GRID COM DROPDOWNS:
         fatura_editada = st.data_editor(
             df_rev, 
             key="editor_fatura", 
@@ -426,9 +440,7 @@ with aba_pdf:
         if col_btn1.button("✅ Confirmar e Salvar no Sistema", type="primary"):
             compras_finais = fatura_editada.to_dict('records')
             for c in compras_finais:
-                # Transforma a data de volta pra texto pro Supabase
                 data_final = c["data_compra"].isoformat() if hasattr(c["data_compra"], 'isoformat') else str(c["data_compra"])
-                
                 supabase.table("gastos").insert({
                     "conta_id": CONTA_ID,
                     "descricao": c["descricao"],
