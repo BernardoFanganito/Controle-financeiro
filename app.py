@@ -20,12 +20,20 @@ genai.configure(api_key=GEMINI_API_KEY)
 modelo_ia = genai.GenerativeModel('gemini-1.5-flash')
 
 # ==========================================
-# SISTEMA DE LOGIN / CADASTRO
+# SISTEMA DE LOGIN (COM MEMÓRIA / PERSISTÊNCIA)
 # ==========================================
-if 'conta_id' not in st.session_state:
-    st.session_state['conta_id'] = None
+# Tenta recuperar o login da URL caso a página seja atualizada
+if st.session_state.get('conta_id') is None:
+    if "cid" in st.query_params:
+        cid_salvo = st.query_params["cid"]
+        resp = supabase.table("contas").select("*").eq("id", cid_salvo).execute()
+        if resp.data:
+            conta = resp.data[0]
+            st.session_state['conta_id'] = conta['id']
+            st.session_state['nome_1'] = conta['nome_1']
+            st.session_state['nome_2'] = conta['nome_2']
 
-if st.session_state['conta_id'] is None:
+if st.session_state.get('conta_id') is None:
     st.title("🔐 Acesso ao Controle Financeiro")
     aba_login, aba_cadastro = st.tabs(["🔑 Fazer Login", "📝 Criar Conta"])
     
@@ -39,6 +47,8 @@ if st.session_state['conta_id'] is None:
                 st.session_state['conta_id'] = conta['id']
                 st.session_state['nome_1'] = conta['nome_1']
                 st.session_state['nome_2'] = conta['nome_2']
+                # Salva o ID na URL para não deslogar no F5
+                st.query_params["cid"] = str(conta['id'])
                 st.success("Login efetuado com sucesso!")
                 st.rerun()
             else:
@@ -82,7 +92,8 @@ OPCOES_COMPRADOR = [NOME_USUARIO_1, NOME_USUARIO_2, "Juntos (Dividido 50/50)"] i
 with st.sidebar:
     st.write(f"Bem-vindos, **{NOME_USUARIO_1} & {NOME_USUARIO_2}**! 👋" if MODO_CASAL else f"Bem-vinda(o), **{NOME_USUARIO_1}**! 👋")
     if st.button("Sair da Conta"):
-        st.session_state.clear()
+        st.query_params.clear() # Limpa a URL
+        st.session_state.clear() # Limpa a memória
         st.rerun()
 
 st.title("💸 Controle Financeiro")
@@ -108,10 +119,8 @@ if not df_rendas.empty:
 # ------------------------------------------
 with aba_dashboard:
     col_v1, col_v2, col_v3 = st.columns(3)
-    
     visao = col_v1.selectbox("De quem é a visão?", ["Visão Geral (Casal)", NOME_USUARIO_1, NOME_USUARIO_2] if MODO_CASAL else [NOME_USUARIO_1])
     
-    # SISTEMA DE FILTROS
     if not df_gastos.empty:
         meses_disp = sorted(df_gastos['mes_ano'].unique().tolist(), reverse=True)
         filtro_mes = col_v2.selectbox("Filtrar por Mês", ["Todos"] + meses_disp)
@@ -120,15 +129,12 @@ with aba_dashboard:
         if usar_dia:
             filtro_dia = col_v3.date_input("Escolha o dia")
         
-        # Aplicando filtros
         df_filtrado = df_gastos.copy()
-        
         if filtro_mes != "Todos":
             df_filtrado = df_filtrado[df_filtrado['mes_ano'] == filtro_mes]
         if usar_dia:
             df_filtrado = df_filtrado[df_filtrado['data_compra'].dt.date == filtro_dia]
             
-        # Filtro de Divisão (50/50)
         if visao != "Visão Geral (Casal)":
             df_indiv = df_filtrado[df_filtrado['comprador'] == visao].copy()
             df_juntos = df_filtrado[df_filtrado['comprador'] == "Juntos (Dividido 50/50)"].copy()
@@ -156,7 +162,6 @@ with aba_dashboard:
         
         st.divider()
 
-        # Gráficos
         col_graf1, col_graf2 = st.columns(2)
         with col_graf1:
             st.write("### 📈 Gastos no Período")
@@ -170,40 +175,30 @@ with aba_dashboard:
                 graf_cat = df_filtrado.groupby('categoria', as_index=False)['valor'].sum()
                 st.bar_chart(graf_cat, x="categoria", y="valor")
 
-        # HISTÓRICO EDITÁVEL COM EXCLUSÃO (num_rows="dynamic")
         st.write("### ✏️ Histórico (Edite, ou Selecione a linha e aperte 'Delete' para excluir)")
         
         df_exibicao = df_filtrado[['id', 'data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'parcela_atual', 'total_parcelas']].copy()
         df_exibicao['data_compra'] = df_exibicao['data_compra'].dt.date
         
         editado = st.data_editor(
-            df_exibicao, 
-            key="editor_gastos", 
-            use_container_width=True,
-            num_rows="dynamic", # <--- Permite adicionar/excluir linhas
+            df_exibicao, key="editor_gastos", use_container_width=True, num_rows="dynamic",
             column_config={
-                "id": None, 
-                "data_compra": st.column_config.DateColumn("Data"),
+                "id": None, "data_compra": st.column_config.DateColumn("Data"),
                 "descricao": st.column_config.TextColumn("Descrição"),
                 "valor": st.column_config.NumberColumn("Valor Parcela (R$)", format="%.2f"),
                 "valor_total": st.column_config.NumberColumn("Total Compra (R$)", format="%.2f"),
                 "categoria": st.column_config.TextColumn("Categoria"),
-            },
-            hide_index=True
+            }, hide_index=True
         )
 
         if st.button("Salvar Alterações/Exclusões"):
             alteracoes = st.session_state.editor_gastos
             fez_algo = False
-            
-            # Processa Exclusões
             if alteracoes.get("deleted_rows"):
                 for row_idx in alteracoes["deleted_rows"]:
                     id_apagar = df_exibicao.iloc[row_idx]['id']
                     supabase.table("gastos").delete().eq("id", int(id_apagar)).execute()
                 fez_algo = True
-                
-            # Processa Edições
             if alteracoes.get("edited_rows"):
                 for row_idx, mudancas in alteracoes["edited_rows"].items():
                     id_editar = df_exibicao.iloc[row_idx]['id']
@@ -213,64 +208,75 @@ with aba_dashboard:
             if fez_algo:
                 st.success("Banco de dados atualizado com sucesso! Recarregando...")
                 st.rerun()
-            else:
-                st.info("Nenhuma modificação detectada.")
     else:
         st.info("Nenhum gasto registrado ainda.")
 
 # ------------------------------------------
-# ABA 2: ADICIONAR GASTO MANUAL (À vista / Parcelado)
+# ABA 2: ADICIONAR GASTO MANUAL (Dinamismo sem st.form)
 # ------------------------------------------
 with aba_add_manual:
     st.subheader("Registrar Nova Compra")
-    with st.form("form_novo_gasto", clear_on_submit=True):
-        desc = st.text_input("O que foi comprado? *")
-        data_compra = st.date_input("Data da Compra *", value=date.today())
-        comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
+    
+    # Criando as opções de categoria dinâmicas lendo do banco
+    categorias_banco = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
+    if not df_gastos.empty:
+        cats_usadas = df_gastos['categoria'].dropna().unique().tolist()
+        for c in cats_usadas:
+            if c not in categorias_banco:
+                categorias_banco.append(c)
+                
+    categorias_banco.append("+ Criar Nova Categoria") # Opção extra no final
+
+    # Inputs Livres (Reagem na hora)
+    desc = st.text_input("O que foi comprado? *", key="g_desc")
+    data_compra = st.date_input("Data da Compra *", value=date.today())
+    comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
+    
+    cat_selecionada = st.selectbox("Categoria *", categorias_banco)
+    if cat_selecionada == "+ Criar Nova Categoria":
+        categoria_final = st.text_input("Digite o nome da sua nova Categoria *", key="g_cat_nova")
+    else:
+        categoria_final = cat_selecionada
+    
+    tipo_pagamento = st.radio("Forma de Pagamento:", ["À vista", "Parcelada"])
+    
+    if tipo_pagamento == "À vista":
+        valor_total_compra = st.number_input("Valor da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_vista")
+        valor_parcela = valor_total_compra
+        total_parcelas = 1
+        parcela_atual = 1
+    else:
+        valor_total_compra = st.number_input("Valor Total da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_parc")
+        col_p1, col_p2 = st.columns(2)
+        total_parcelas = col_p2.number_input("Quantidade Total de Parcelas *", min_value=2, value=2)
+        parcela_atual = col_p1.number_input("Qual parcela é essa? *", min_value=1, value=1)
+        valor_parcela = valor_total_compra / total_parcelas if total_parcelas > 0 else 0
+        st.info(f"O valor de cada parcela será: **R$ {valor_parcela:.2f}** (Este é o valor que aparecerá no relatório mensal)")
         
-        cat_selecionada = st.selectbox("Categoria *", ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas", "Outros"])
-        categoria_final = st.text_input("Se 'Outros', qual a categoria?") if cat_selecionada == "Outros" else cat_selecionada
-        
-        # MÁGICA DO À VISTA / PARCELADO
-        tipo_pagamento = st.radio("Forma de Pagamento:", ["À vista", "Parcelada"])
-        
-        if tipo_pagamento == "À vista":
-            valor_total_compra = st.number_input("Valor da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f")
-            valor_parcela = valor_total_compra
-            total_parcelas = 1
-            parcela_atual = 1
+    recorrente = st.checkbox("Compra recorrente mensal (Fixo)?")
+    
+    if st.button("Salvar Gasto", type="primary"):
+        if not desc.strip() or valor_total_compra <= 0:
+            st.error("Erro: Preencha a descrição e o valor!")
+        elif cat_selecionada == "+ Criar Nova Categoria" and not categoria_final.strip():
+            st.error("Erro: Você esqueceu de digitar o nome da nova categoria!")
         else:
-            valor_total_compra = st.number_input("Valor Total da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f", help="O valor cheio do produto")
-            col_p1, col_p2 = st.columns(2)
-            total_parcelas = col_p2.number_input("Quantidade Total de Parcelas *", min_value=2, value=2)
-            parcela_atual = col_p1.number_input("Qual parcela é essa? *", min_value=1, value=1)
+            novo_gasto = {
+                "conta_id": CONTA_ID, "descricao": desc,
+                "valor": float(valor_parcela), "valor_total": float(valor_total_compra),
+                "categoria": categoria_final, "comprador": comprador,
+                "data_compra": data_compra.isoformat(), "recorrente": recorrente,
+                "parcela_atual": int(parcela_atual), "total_parcelas": int(total_parcelas)
+            }
+            supabase.table("gastos").insert(novo_gasto).execute()
             
-            # Calcula automático o valor da parcela
-            valor_parcela = valor_total_compra / total_parcelas if total_parcelas > 0 else 0
-            st.info(f"O valor de cada parcela será: **R$ {valor_parcela:.2f}** (É este valor que entrará no gráfico de gastos deste mês)")
-            
-        recorrente = st.checkbox("Compra recorrente mensal (Fixo)?")
-        enviou = st.form_submit_button("Salvar Gasto")
-        
-        if enviou:
-            if not desc.strip() or valor_total_compra <= 0:
-                st.error("Erro: Preencha a descrição e o valor!")
-            else:
-                novo_gasto = {
-                    "conta_id": CONTA_ID,
-                    "descricao": desc,
-                    "valor": float(valor_parcela), # O que pesa no mês é a parcela
-                    "valor_total": float(valor_total_compra), # Guardamos o valor cheio
-                    "categoria": categoria_final,
-                    "comprador": comprador,
-                    "data_compra": data_compra.isoformat(),
-                    "recorrente": recorrente,
-                    "parcela_atual": int(parcela_atual),
-                    "total_parcelas": int(total_parcelas)
-                }
-                supabase.table("gastos").insert(novo_gasto).execute()
-                st.success(f"Gasto '{desc}' salvo com sucesso!")
-                st.rerun()
+            # Limpa os campos da tela deletando eles da memória antes de atualizar
+            for key in ['g_desc', 'g_val_vista', 'g_val_parc', 'g_cat_nova']:
+                if key in st.session_state:
+                    del st.session_state[key]
+                    
+            st.success("Gasto salvo com sucesso!")
+            st.rerun()
 
 # ------------------------------------------
 # ABA 3: RENDAS, HISTÓRICO EDITÁVEL
@@ -292,8 +298,7 @@ with aba_renda:
     st.divider()
     
     if not df_rendas.empty:
-        st.write("### ✏️ Edição de Salários (Apague os repetidos aqui!)")
-        st.write("Selecione a linha na caixinha à esquerda e aperte 'Delete' no teclado para excluir.")
+        st.write("### ✏️ Edição de Salários")
         
         df_r_exib = df_rendas[['id', 'mes_referencia', 'usuario', 'valor']].copy()
         df_r_exib['mes_referencia'] = df_r_exib['mes_referencia'].dt.date
@@ -310,13 +315,11 @@ with aba_renda:
         if st.button("Salvar Alterações de Salário"):
             alt_r = st.session_state.editor_rendas
             fez_algo_r = False
-            
             if alt_r.get("deleted_rows"):
                 for idx in alt_r["deleted_rows"]:
                     id_del = df_r_exib.iloc[idx]['id']
                     supabase.table("receitas").delete().eq("id", int(id_del)).execute()
                 fez_algo_r = True
-                
             if alt_r.get("edited_rows"):
                 for idx, mudancas in alt_r["edited_rows"].items():
                     id_upd = df_r_exib.iloc[idx]['id']
@@ -353,8 +356,8 @@ with aba_pdf:
                 for c in compras:
                     supabase.table("gastos").insert({
                         "conta_id": CONTA_ID, "descricao": c["descricao"],
-                        "valor": c["valor"], # PDF normalmente já traz o valor da parcela
-                        "valor_total": c["valor"], # Assumimos igual se a IA não separar
+                        "valor": c["valor"], 
+                        "valor_total": c["valor"], 
                         "categoria": c["categoria"], "comprador": dono_fatura,
                         "data_compra": data_fatura.isoformat(), "recorrente": False,
                         "parcela_atual": c.get("parcela_atual", 1), "total_parcelas": c.get("total_parcelas", 1)
