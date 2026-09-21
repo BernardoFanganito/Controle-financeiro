@@ -55,10 +55,7 @@ if st.session_state.get('conta_id') is None:
         novo_usuario = st.text_input("Crie um nome de Usuário")
         nova_senha = st.text_input("Crie uma Senha", type="password")
         nome_1 = st.text_input("Seu Nome (Pessoa 1)")
-        
-        nome_2 = ""
-        if tipo_conta == "Em Casal":
-            nome_2 = st.text_input("Nome do Parceiro(a) (Pessoa 2)")
+        nome_2 = st.text_input("Nome do Parceiro(a) (Pessoa 2)") if tipo_conta == "Em Casal" else ""
         
         if st.button("Criar Conta"):
             if not novo_usuario or not nova_senha or not nome_1:
@@ -103,9 +100,16 @@ resp_rendas = supabase.table("receitas").select("*").eq("conta_id", CONTA_ID).ex
 df_gastos = pd.DataFrame(resp_gastos.data) if resp_gastos.data else pd.DataFrame()
 df_rendas = pd.DataFrame(resp_rendas.data) if resp_rendas.data else pd.DataFrame()
 
+# Cria a lista global de categorias puxando as já cadastradas
+categorias_banco = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
 if not df_gastos.empty:
     df_gastos['data_compra'] = pd.to_datetime(df_gastos['data_compra'])
     df_gastos['mes_ano'] = df_gastos['data_compra'].dt.strftime('%Y-%m')
+    cats_usadas = df_gastos['categoria'].dropna().unique().tolist()
+    for c in cats_usadas:
+        if c not in categorias_banco:
+            categorias_banco.append(c)
+
 if not df_rendas.empty:
     df_rendas['mes_referencia'] = pd.to_datetime(df_rendas['mes_referencia'])
     df_rendas['mes_ano'] = df_rendas['mes_referencia'].dt.strftime('%Y-%m')
@@ -161,7 +165,7 @@ with aba_dashboard:
                 graf_cat = df_filtrado.groupby('categoria', as_index=False)['valor'].sum()
                 st.bar_chart(graf_cat, x="categoria", y="valor")
 
-        st.write("### ✏️ Histórico (Edite, ou Selecione a linha e aperte 'Delete' para excluir)")
+        st.write("### ✏️ Histórico (Dê 2 cliques para Editar, ou selecione a linha e aperte 'Delete')")
         
         df_exibicao = df_filtrado[['id', 'data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'parcela_atual', 'total_parcelas']].copy()
         df_exibicao['data_compra'] = df_exibicao['data_compra'].dt.date
@@ -169,11 +173,16 @@ with aba_dashboard:
         editado = st.data_editor(
             df_exibicao, key="editor_gastos", use_container_width=True, num_rows="dynamic",
             column_config={
-                "id": None, "data_compra": st.column_config.DateColumn("Data"),
+                "id": None, 
+                "data_compra": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição"),
                 "valor": st.column_config.NumberColumn("Valor Parcela (R$)", format="%.2f"),
                 "valor_total": st.column_config.NumberColumn("Total Compra (R$)", format="%.2f"),
-                "categoria": st.column_config.TextColumn("Categoria"),
+                # DROPDOWNS APLICADOS NO DASHBOARD:
+                "categoria": st.column_config.SelectboxColumn("Categoria", options=categorias_banco, required=True),
+                "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
+                "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
+                "total_parcelas": st.column_config.NumberColumn("Total", min_value=1)
             }, hide_index=True
         )
 
@@ -188,6 +197,8 @@ with aba_dashboard:
             if alteracoes.get("edited_rows"):
                 for row_idx, mudancas in alteracoes["edited_rows"].items():
                     id_editar = df_exibicao.iloc[row_idx]['id']
+                    if 'data_compra' in mudancas: # Tratamento para não quebrar a data
+                         mudancas['data_compra'] = mudancas['data_compra'] + "T00:00:00"
                     supabase.table("gastos").update(mudancas).eq("id", int(id_editar)).execute()
                 fez_algo = True
             if fez_algo:
@@ -202,19 +213,14 @@ with aba_dashboard:
 with aba_add_manual:
     st.subheader("Registrar Nova Compra")
     
-    categorias_banco = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
-    if not df_gastos.empty:
-        cats_usadas = df_gastos['categoria'].dropna().unique().tolist()
-        for c in cats_usadas:
-            if c not in categorias_banco:
-                categorias_banco.append(c)
-    categorias_banco.append("+ Criar Nova Categoria")
+    opcoes_cat_manual = categorias_banco.copy()
+    opcoes_cat_manual.append("+ Criar Nova Categoria")
 
     desc = st.text_input("O que foi comprado? *", key="g_desc")
     data_compra = st.date_input("Data da Compra *", value=date.today())
     comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
     
-    cat_selecionada = st.selectbox("Categoria *", categorias_banco)
+    cat_selecionada = st.selectbox("Categoria *", opcoes_cat_manual)
     if cat_selecionada == "+ Criar Nova Categoria":
         categoria_final = st.text_input("Digite o nome da sua nova Categoria *", key="g_cat_nova")
     else:
@@ -255,12 +261,11 @@ with aba_add_manual:
             
             for key in ['g_desc', 'g_val_vista', 'g_val_parc_tot', 'g_val_parc_mensal', 'g_cat_nova']:
                 if key in st.session_state: del st.session_state[key]
-                    
             st.success("Gasto salvo com sucesso!")
             st.rerun()
 
 # ------------------------------------------
-# ABA 3: RENDAS, HISTÓRICO EDITÁVEL
+# ABA 3: RENDAS E SALÁRIOS
 # ------------------------------------------
 with aba_renda:
     st.subheader("💰 Salários e Sobras")
@@ -282,7 +287,13 @@ with aba_renda:
         df_r_exib['mes_referencia'] = df_r_exib['mes_referencia'].dt.date
         edit_renda = st.data_editor(
             df_r_exib, key="editor_rendas", num_rows="dynamic", use_container_width=True,
-            column_config={"id": None, "mes_referencia": st.column_config.DateColumn("Data"), "usuario": st.column_config.TextColumn("Pessoa"), "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f")}, hide_index=True
+            column_config={
+                "id": None, 
+                "mes_referencia": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), 
+                # DROPDOWN NO SALÁRIO TAMBÉM:
+                "usuario": st.column_config.SelectboxColumn("Pessoa", options=OPCOES_COMPRADOR[:2], required=True), 
+                "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f")
+            }, hide_index=True
         )
         if st.button("Salvar Alterações de Salário"):
             alt_r = st.session_state.editor_rendas
@@ -295,6 +306,7 @@ with aba_renda:
             if alt_r.get("edited_rows"):
                 for idx, mudancas in alt_r["edited_rows"].items():
                     id_upd = df_r_exib.iloc[idx]['id']
+                    if 'mes_referencia' in mudancas: mudancas['mes_referencia'] = mudancas['mes_referencia'] + "T00:00:00"
                     supabase.table("receitas").update(mudancas).eq("id", int(id_upd)).execute()
                 fez_algo_r = True
             if fez_algo_r:
@@ -302,94 +314,106 @@ with aba_renda:
                 st.rerun()
 
 # ------------------------------------------
-# ABA 4: IMPORTAR FATURA (COM FALLBACK DINÂMICO DE MODELOS)
+# ABA 4: IMPORTAR FATURA (Com Datas Inteligentes e Dropdowns)
 # ------------------------------------------
 with aba_pdf:
     if 'fatura_em_revisao' not in st.session_state:
         st.subheader("Importar Fatura")
-        dono_fatura = st.radio("Essa fatura é de quem?", OPCOES_COMPRADOR, key="dono_fat")
+        st.write("A IA vai procurar a data exata de cada compra. A 'Data base' abaixo será usada só para compras onde a IA não achar a data.")
+        dono_fatura = st.radio("Essa fatura é primariamente de quem?", OPCOES_COMPRADOR, key="dono_fat")
         data_fatura = st.date_input("Data base dessa fatura", value=date.today())
         arquivo_pdf = st.file_uploader("Escolha o arquivo PDF", type=["pdf"])
         
         if arquivo_pdf is not None and st.button("Analisar Fatura"):
-            with st.spinner("A IA está analisando o PDF da sua fatura... Isso pode levar alguns segundos."):
+            with st.spinner("A IA está analisando o PDF da sua fatura e lendo as datas..."):
                 try:
                     pdf_bytes = arquivo_pdf.getvalue()
-                    
+                    # PROMPT MELHORADO COM DATA DA COMPRA
                     prompt = """
-                    Leia o documento da fatura de cartão de crédito anexado. Extraia APENAS as compras realizadas.
+                    Leia a fatura de cartão anexada. Extraia APENAS as compras realizadas.
                     Ignore pagamentos de fatura, estornos, saldos anteriores ou encargos.
                     
-                    Retorne EXCLUSIVAMENTE um array JSON válido sem marcadores de código markdown adicionais (ex: retorne apenas o JSON puro).
-                    Cada objeto do array deve conter obrigatoriamente as chaves:
+                    Retorne EXCLUSIVAMENTE um array JSON. 
+                    Cada objeto deve conter:
+                    - "data_compra": (string, formato YYYY-MM-DD. Tente identificar a data exata da compra na fatura. Presuma o ano atual se não houver)
                     - "descricao": (string, nome do estabelecimento)
-                    - "valor": (numero decimal, referente à parcela cobrada no mês. Ex: 45.90)
-                    - "valor_total": (numero decimal, valor total cheio da compra se informado. Se não tiver, use o mesmo valor do campo "valor")
-                    - "categoria": (string, classifique em: Comida, Mercado, Transporte, Roupas, Lazer, Casa, Saúde, etc)
-                    - "parcela_atual": (inteiro, informe o número da parcela. Se for à vista, use 1)
-                    - "total_parcelas": (inteiro, informe o total de parcelas. Se for à vista, use 1)
+                    - "valor": (numero decimal, parcela do mês)
+                    - "valor_total": (numero decimal, total da compra)
+                    - "categoria": (string)
+                    - "parcela_atual": (inteiro)
+                    - "total_parcelas": (inteiro)
                     """
                     
-                    # Testa os modelos mais recentes em ordem até um responder
-                    modelos_para_testar = [
-                        'gemini-2.5-flash',
-                        'gemini-2.0-flash',
-                        'gemini-1.5-flash-latest',
-                        'gemini-1.5-flash-002',
-                        'gemini-1.5-flash'
-                    ]
-                    
+                    modelos_para_testar = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash']
                     resposta_ia = None
                     ultimo_erro = None
                     
                     for nome_modelo in modelos_para_testar:
                         try:
                             mod = genai.GenerativeModel(nome_modelo)
-                            resposta_ia = mod.generate_content([
-                                prompt,
-                                {"mime_type": "application/pdf", "data": pdf_bytes}
-                            ])
-                            if resposta_ia and resposta_ia.text:
-                                break
+                            resposta_ia = mod.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+                            if resposta_ia and resposta_ia.text: break
                         except Exception as err:
                             ultimo_erro = err
                             continue
                             
                     if not resposta_ia or not resposta_ia.text:
-                        raise ultimo_erro if ultimo_erro else Exception("Nenhum modelo Gemini respondeu.")
+                        raise ultimo_erro if ultimo_erro else Exception("Nenhum modelo respondeu.")
 
                     texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
                     compras_extraidas = json.loads(texto_json)
                     
+                    # Trata os dados extras que vieram da IA antes de ir pra tela
+                    for c in compras_extraidas:
+                        c['comprador'] = dono_fatura # O valor inicial do radio
+                        if not c.get("data_compra"):
+                            c["data_compra"] = data_fatura.isoformat()
+                    
                     st.session_state['fatura_em_revisao'] = compras_extraidas
-                    st.session_state['fatura_dono'] = dono_fatura
-                    st.session_state['fatura_data'] = data_fatura
+                    st.session_state['fatura_data_base'] = data_fatura
                     st.rerun()
                 except Exception as e:
-                    st.error("Não foi possível extrair os dados desta fatura. Certifique-se de que é um PDF válido.")
+                    st.error("Erro na leitura. Certifique-se de que é um PDF válido.")
                     st.error(f"Erro técnico: {e}")
                     
     else:
         st.subheader("🔍 Validação da Fatura")
-        st.write("A Inteligência Artificial encontrou os gastos abaixo. **Valide as informações, altere categorias, ajuste os valores ou exclua o que não quiser salvar.**")
+        st.write("Dê dois cliques nas células para **alterar as Categorias ou os Compradores selecionando nas listas**, ajuste datas/valores ou exclua (Delete) o que não quiser salvar.")
         
         df_rev = pd.DataFrame(st.session_state['fatura_em_revisao'])
         
-        colunas_necessarias = ['descricao', 'valor', 'valor_total', 'categoria', 'parcela_atual', 'total_parcelas']
-        for col in colunas_necessarias:
+        # Garante a existência das colunas
+        col_nec = ['data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'parcela_atual', 'total_parcelas']
+        for col in col_nec:
             if col not in df_rev.columns:
-                df_rev[col] = 1 if 'parcela' in col else (0.0 if 'valor' in col else "")
+                if 'parcela' in col: df_rev[col] = 1
+                elif 'valor' in col: df_rev[col] = 0.0
+                elif col == 'comprador': df_rev[col] = OPCOES_COMPRADOR[0]
+                elif col == 'data_compra': df_rev[col] = st.session_state['fatura_data_base']
+                else: df_rev[col] = ""
                 
+        # Força as datas para o tipo certo do Streamlit
+        df_rev['data_compra'] = pd.to_datetime(df_rev['data_compra'], errors='coerce').dt.date
+        df_rev['data_compra'] = df_rev['data_compra'].fillna(st.session_state['fatura_data_base'])
+        
+        # Cria lista de opções de categorias juntando as do banco com as inventadas pela IA
+        opcoes_cat_fatura = categorias_banco.copy()
+        for cat in df_rev['categoria'].dropna().unique():
+            if cat not in opcoes_cat_fatura: opcoes_cat_fatura.append(cat)
+                
+        # GRID COM DROPDOWNS:
         fatura_editada = st.data_editor(
             df_rev, 
             key="editor_fatura", 
             use_container_width=True, 
             num_rows="dynamic",
             column_config={
+                "data_compra": st.column_config.DateColumn("Data da Compra", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição da Compra"),
                 "valor": st.column_config.NumberColumn("Valor PARCELA (R$)", format="%.2f"),
                 "valor_total": st.column_config.NumberColumn("Valor TOTAL (R$)", format="%.2f"),
-                "categoria": st.column_config.TextColumn("Categoria"),
+                "categoria": st.column_config.SelectboxColumn("Categoria", options=opcoes_cat_fatura, required=True),
+                "comprador": st.column_config.SelectboxColumn("De quem é a conta?", options=OPCOES_COMPRADOR, required=True),
                 "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
                 "total_parcelas": st.column_config.NumberColumn("Total Parcelas", min_value=1),
             }, 
@@ -402,27 +426,28 @@ with aba_pdf:
         if col_btn1.button("✅ Confirmar e Salvar no Sistema", type="primary"):
             compras_finais = fatura_editada.to_dict('records')
             for c in compras_finais:
+                # Transforma a data de volta pra texto pro Supabase
+                data_final = c["data_compra"].isoformat() if hasattr(c["data_compra"], 'isoformat') else str(c["data_compra"])
+                
                 supabase.table("gastos").insert({
                     "conta_id": CONTA_ID,
                     "descricao": c["descricao"],
                     "valor": float(c["valor"]), 
                     "valor_total": float(c.get("valor_total", c["valor"])), 
                     "categoria": c["categoria"], 
-                    "comprador": st.session_state['fatura_dono'],
-                    "data_compra": st.session_state['fatura_data'].isoformat(),
+                    "comprador": c["comprador"],
+                    "data_compra": data_final,
                     "recorrente": False,
                     "parcela_atual": int(c.get("parcela_atual", 1)),
                     "total_parcelas": int(c.get("total_parcelas", 1))
                 }).execute()
             
             del st.session_state['fatura_em_revisao']
-            del st.session_state['fatura_dono']
-            del st.session_state['fatura_data']
+            del st.session_state['fatura_data_base']
             st.success("Todas as compras validadas foram salvas com sucesso!")
             st.rerun()
             
         if col_btn2.button("❌ Cancelar Importação"):
             del st.session_state['fatura_em_revisao']
-            del st.session_state['fatura_dono']
-            del st.session_state['fatura_data']
+            del st.session_state['fatura_data_base']
             st.rerun()
