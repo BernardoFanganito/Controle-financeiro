@@ -1,7 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
 from supabase import create_client
-import PyPDF2
 import json
 import pandas as pd
 from datetime import datetime, date
@@ -230,7 +229,6 @@ with aba_add_manual:
         total_parcelas = 1
         parcela_atual = 1
     else:
-        # AGORA OS DOIS CAMPOS APARECEM LADO A LADO PARA VOCÊ PREENCHER
         col_vt, col_vp = st.columns(2)
         valor_total_compra = col_vt.number_input("Valor TOTAL da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_parc_tot")
         valor_parcela = col_vp.number_input("Valor da PARCELA Mensal (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_parc_mensal")
@@ -305,10 +303,9 @@ with aba_renda:
                 st.rerun()
 
 # ------------------------------------------
-# ABA 4: IMPORTAR FATURA (PDF COM VALIDAÇÃO)
+# ABA 4: IMPORTAR FATURA (LEITURA DIRETA POR IA)
 # ------------------------------------------
 with aba_pdf:
-    # Se NÃO houver fatura em revisão, mostra o botão de upload
     if 'fatura_em_revisao' not in st.session_state:
         st.subheader("Importar Fatura")
         dono_fatura = st.radio("Essa fatura é de quem?", OPCOES_COMPRADOR, key="dono_fat")
@@ -316,44 +313,47 @@ with aba_pdf:
         arquivo_pdf = st.file_uploader("Escolha o arquivo PDF", type=["pdf"])
         
         if arquivo_pdf is not None and st.button("Analisar Fatura"):
-            with st.spinner("Lendo sua fatura e separando as compras... Isso pode levar alguns segundos."):
-                leitor = PyPDF2.PdfReader(arquivo_pdf)
-                texto_fatura = "".join([p.extract_text() for p in leitor.pages])
-                prompt = f"""
-                Leia a fatura de cartão. Extraia APENAS as compras realizadas.
-                Retorne APENAS um array JSON válido (sem formatação ou texto antes/depois). 
-                Cada objeto deve ter obrigatoriamente:
-                "descricao" (string), 
-                "valor" (numero decimal, referente à parcela cobrada no mês. Use ponto, não vírgula), 
-                "valor_total" (numero decimal, referente ao valor total cheio da compra se informado. Se não tiver, coloque igual ao "valor"), 
-                "categoria" (string genérica, ex: Comida, Transporte, Roupas, etc), 
-                "parcela_atual" (inteiro, 1 se for à vista), 
-                "total_parcelas" (inteiro, 1 se for à vista).
-                Fatura: {texto_fatura}
-                """
+            with st.spinner("A IA está analisando o PDF da sua fatura... Isso pode levar alguns segundos."):
                 try:
-                    resposta_ia = modelo_ia.generate_content(prompt)
+                    # Lê os bytes do PDF e envia diretamente para o Gemini (Multimodal)
+                    pdf_bytes = arquivo_pdf.getvalue()
+                    
+                    prompt = """
+                    Leia o documento da fatura de cartão de crédito anexado. Extraia APENAS as compras realizadas.
+                    Ignore pagamentos de fatura, estornos, saldos anteriores ou encargos.
+                    
+                    Retorne EXCLUSIVAMENTE um array JSON válido sem marcadores de código markdown adicionais (ex: retorne apenas o JSON puro).
+                    Cada objeto do array deve conter obrigatoriamente as chaves:
+                    - "descricao": (string, nome do estabelecimento)
+                    - "valor": (numero decimal, referente à parcela cobrada no mês. Ex: 45.90)
+                    - "valor_total": (numero decimal, valor total cheio da compra se informado. Se não tiver, use o mesmo valor do campo "valor")
+                    - "categoria": (string, classifique em: Comida, Mercado, Transporte, Roupas, Lazer, Casa, Saúde, etc)
+                    - "parcela_atual": (inteiro, informe o número da parcela. Se for à vista, use 1)
+                    - "total_parcelas": (inteiro, informe o total de parcelas. Se for à vista, use 1)
+                    """
+                    
+                    resposta_ia = modelo_ia.generate_content([
+                        prompt,
+                        {"mime_type": "application/pdf", "data": pdf_bytes}
+                    ])
+                    
                     texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
                     compras_extraidas = json.loads(texto_json)
                     
-                    # Salva temporariamente para revisão na tela
                     st.session_state['fatura_em_revisao'] = compras_extraidas
                     st.session_state['fatura_dono'] = dono_fatura
                     st.session_state['fatura_data'] = data_fatura
                     st.rerun()
                 except Exception as e:
-                    st.error("Ocorreu um erro ao ler o PDF. Tente novamente ou verifique se o arquivo está legível.")
+                    st.error("Não foi possível extrair os dados desta fatura. Certifique-se de que é um PDF válido.")
                     st.error(f"Erro técnico: {e}")
                     
-    # Se HOUVER uma fatura lida, mostra a TELA DE VALIDAÇÃO
     else:
         st.subheader("🔍 Validação da Fatura")
-        st.write("A Inteligência Artificial encontrou os gastos abaixo. **Valide as informações, altere categorias, ajuste os valores ou exclua (selecionando a linha e apertando Delete) o que não quiser salvar.**")
+        st.write("A Inteligência Artificial encontrou os gastos abaixo. **Valide as informações, altere categorias, ajuste os valores ou exclua o que não quiser salvar.**")
         
-        # Converte a lista extraída em DataFrame para exibir na tabela editável
         df_rev = pd.DataFrame(st.session_state['fatura_em_revisao'])
         
-        # Garante que as colunas existam para não dar erro
         colunas_necessarias = ['descricao', 'valor', 'valor_total', 'categoria', 'parcela_atual', 'total_parcelas']
         for col in colunas_necessarias:
             if col not in df_rev.columns:
@@ -394,7 +394,6 @@ with aba_pdf:
                     "total_parcelas": int(c.get("total_parcelas", 1))
                 }).execute()
             
-            # Limpa a memória para permitir nova leitura
             del st.session_state['fatura_em_revisao']
             del st.session_state['fatura_dono']
             del st.session_state['fatura_data']
