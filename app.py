@@ -16,7 +16,6 @@ GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
-modelo_ia = genai.GenerativeModel('gemini-1.5-flash')
 
 # ==========================================
 # SISTEMA DE LOGIN (COM MEMÓRIA / PERSISTÊNCIA)
@@ -303,7 +302,7 @@ with aba_renda:
                 st.rerun()
 
 # ------------------------------------------
-# ABA 4: IMPORTAR FATURA (LEITURA DIRETA POR IA)
+# ABA 4: IMPORTAR FATURA (COM FALLBACK DINÂMICO DE MODELOS)
 # ------------------------------------------
 with aba_pdf:
     if 'fatura_em_revisao' not in st.session_state:
@@ -315,7 +314,6 @@ with aba_pdf:
         if arquivo_pdf is not None and st.button("Analisar Fatura"):
             with st.spinner("A IA está analisando o PDF da sua fatura... Isso pode levar alguns segundos."):
                 try:
-                    # Lê os bytes do PDF e envia diretamente para o Gemini (Multimodal)
                     pdf_bytes = arquivo_pdf.getvalue()
                     
                     prompt = """
@@ -332,11 +330,34 @@ with aba_pdf:
                     - "total_parcelas": (inteiro, informe o total de parcelas. Se for à vista, use 1)
                     """
                     
-                    resposta_ia = modelo_ia.generate_content([
-                        prompt,
-                        {"mime_type": "application/pdf", "data": pdf_bytes}
-                    ])
+                    # Testa os modelos mais recentes em ordem até um responder
+                    modelos_para_testar = [
+                        'gemini-2.5-flash',
+                        'gemini-2.0-flash',
+                        'gemini-1.5-flash-latest',
+                        'gemini-1.5-flash-002',
+                        'gemini-1.5-flash'
+                    ]
                     
+                    resposta_ia = None
+                    ultimo_erro = None
+                    
+                    for nome_modelo in modelos_para_testar:
+                        try:
+                            mod = genai.GenerativeModel(nome_modelo)
+                            resposta_ia = mod.generate_content([
+                                prompt,
+                                {"mime_type": "application/pdf", "data": pdf_bytes}
+                            ])
+                            if resposta_ia and resposta_ia.text:
+                                break
+                        except Exception as err:
+                            ultimo_erro = err
+                            continue
+                            
+                    if not resposta_ia or not resposta_ia.text:
+                        raise ultimo_erro if ultimo_erro else Exception("Nenhum modelo Gemini respondeu.")
+
                     texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
                     compras_extraidas = json.loads(texto_json)
                     
