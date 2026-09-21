@@ -22,7 +22,6 @@ modelo_ia = genai.GenerativeModel('gemini-1.5-flash')
 # ==========================================
 # SISTEMA DE LOGIN (COM MEMÓRIA / PERSISTÊNCIA)
 # ==========================================
-# Tenta recuperar o login da URL caso a página seja atualizada
 if st.session_state.get('conta_id') is None:
     if "cid" in st.query_params:
         cid_salvo = st.query_params["cid"]
@@ -47,7 +46,6 @@ if st.session_state.get('conta_id') is None:
                 st.session_state['conta_id'] = conta['id']
                 st.session_state['nome_1'] = conta['nome_1']
                 st.session_state['nome_2'] = conta['nome_2']
-                # Salva o ID na URL para não deslogar no F5
                 st.query_params["cid"] = str(conta['id'])
                 st.success("Login efetuado com sucesso!")
                 st.rerun()
@@ -92,8 +90,8 @@ OPCOES_COMPRADOR = [NOME_USUARIO_1, NOME_USUARIO_2, "Juntos (Dividido 50/50)"] i
 with st.sidebar:
     st.write(f"Bem-vindos, **{NOME_USUARIO_1} & {NOME_USUARIO_2}**! 👋" if MODO_CASAL else f"Bem-vinda(o), **{NOME_USUARIO_1}**! 👋")
     if st.button("Sair da Conta"):
-        st.query_params.clear() # Limpa a URL
-        st.session_state.clear() # Limpa a memória
+        st.query_params.clear()
+        st.session_state.clear()
         st.rerun()
 
 st.title("💸 Controle Financeiro")
@@ -101,7 +99,7 @@ aba_dashboard, aba_add_manual, aba_renda, aba_pdf = st.tabs([
     "📊 Visão e Edição", "✍️ Registrar Compra", "💰 Meus Salários", "📄 Importar Fatura"
 ])
 
-# Busca dados
+# Busca dados do Banco
 resp_gastos = supabase.table("gastos").select("*").eq("conta_id", CONTA_ID).execute()
 resp_rendas = supabase.table("receitas").select("*").eq("conta_id", CONTA_ID).execute()
 df_gastos = pd.DataFrame(resp_gastos.data) if resp_gastos.data else pd.DataFrame()
@@ -115,7 +113,7 @@ if not df_rendas.empty:
     df_rendas['mes_ano'] = df_rendas['mes_referencia'].dt.strftime('%Y-%m')
 
 # ------------------------------------------
-# ABA 1: DASHBOARD (Filtros e Exclusão)
+# ABA 1: DASHBOARD
 # ------------------------------------------
 with aba_dashboard:
     col_v1, col_v2, col_v3 = st.columns(3)
@@ -124,16 +122,12 @@ with aba_dashboard:
     if not df_gastos.empty:
         meses_disp = sorted(df_gastos['mes_ano'].unique().tolist(), reverse=True)
         filtro_mes = col_v2.selectbox("Filtrar por Mês", ["Todos"] + meses_disp)
-        
         usar_dia = col_v3.checkbox("Filtrar por um dia específico?")
-        if usar_dia:
-            filtro_dia = col_v3.date_input("Escolha o dia")
+        if usar_dia: filtro_dia = col_v3.date_input("Escolha o dia")
         
         df_filtrado = df_gastos.copy()
-        if filtro_mes != "Todos":
-            df_filtrado = df_filtrado[df_filtrado['mes_ano'] == filtro_mes]
-        if usar_dia:
-            df_filtrado = df_filtrado[df_filtrado['data_compra'].dt.date == filtro_dia]
+        if filtro_mes != "Todos": df_filtrado = df_filtrado[df_filtrado['mes_ano'] == filtro_mes]
+        if usar_dia: df_filtrado = df_filtrado[df_filtrado['data_compra'].dt.date == filtro_dia]
             
         if visao != "Visão Geral (Casal)":
             df_indiv = df_filtrado[df_filtrado['comprador'] == visao].copy()
@@ -149,17 +143,12 @@ with aba_dashboard:
         
         if not df_rendas.empty:
             df_rendas_filtro = df_rendas.copy()
-            if filtro_mes != "Todos":
-                df_rendas_filtro = df_rendas_filtro[df_rendas_filtro['mes_ano'] == filtro_mes]
-                
-            if visao == "Visão Geral (Casal)":
-                total_renda = df_rendas_filtro['valor'].sum()
-            else:
-                total_renda = df_rendas_filtro[df_rendas_filtro['usuario'] == visao]['valor'].sum()
+            if filtro_mes != "Todos": df_rendas_filtro = df_rendas_filtro[df_rendas_filtro['mes_ano'] == filtro_mes]
+            if visao == "Visão Geral (Casal)": total_renda = df_rendas_filtro['valor'].sum()
+            else: total_renda = df_rendas_filtro[df_rendas_filtro['usuario'] == visao]['valor'].sum()
             
             c2.metric("Renda Total do Período", f"R$ {total_renda:.2f}")
             c3.metric("Saldo Sobrando", f"R$ {(total_renda - total_gasto):.2f}", delta=float(total_renda - total_gasto))
-        
         st.divider()
 
         col_graf1, col_graf2 = st.columns(2)
@@ -168,7 +157,6 @@ with aba_dashboard:
             if not df_filtrado.empty:
                 graf_tempo = df_filtrado.groupby('data_compra', as_index=False)['valor'].sum()
                 st.bar_chart(graf_tempo, x="data_compra", y="valor")
-            
         with col_graf2:
             st.write("### 🍕 Gastos por Categoria")
             if not df_filtrado.empty:
@@ -204,7 +192,6 @@ with aba_dashboard:
                     id_editar = df_exibicao.iloc[row_idx]['id']
                     supabase.table("gastos").update(mudancas).eq("id", int(id_editar)).execute()
                 fez_algo = True
-                
             if fez_algo:
                 st.success("Banco de dados atualizado com sucesso! Recarregando...")
                 st.rerun()
@@ -212,22 +199,19 @@ with aba_dashboard:
         st.info("Nenhum gasto registrado ainda.")
 
 # ------------------------------------------
-# ABA 2: ADICIONAR GASTO MANUAL (Dinamismo sem st.form)
+# ABA 2: ADICIONAR GASTO MANUAL
 # ------------------------------------------
 with aba_add_manual:
     st.subheader("Registrar Nova Compra")
     
-    # Criando as opções de categoria dinâmicas lendo do banco
     categorias_banco = ["Comida/Mercado", "Compras Gerais", "Aluguel", "Casa/Doméstico", "Viagem", "Lazer/Saídas"]
     if not df_gastos.empty:
         cats_usadas = df_gastos['categoria'].dropna().unique().tolist()
         for c in cats_usadas:
             if c not in categorias_banco:
                 categorias_banco.append(c)
-                
-    categorias_banco.append("+ Criar Nova Categoria") # Opção extra no final
+    categorias_banco.append("+ Criar Nova Categoria")
 
-    # Inputs Livres (Reagem na hora)
     desc = st.text_input("O que foi comprado? *", key="g_desc")
     data_compra = st.date_input("Data da Compra *", value=date.today())
     comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
@@ -246,12 +230,14 @@ with aba_add_manual:
         total_parcelas = 1
         parcela_atual = 1
     else:
-        valor_total_compra = st.number_input("Valor Total da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_parc")
+        # AGORA OS DOIS CAMPOS APARECEM LADO A LADO PARA VOCÊ PREENCHER
+        col_vt, col_vp = st.columns(2)
+        valor_total_compra = col_vt.number_input("Valor TOTAL da Compra (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_parc_tot")
+        valor_parcela = col_vp.number_input("Valor da PARCELA Mensal (R$) *", min_value=0.00, step=10.00, format="%.2f", key="g_val_parc_mensal")
+        
         col_p1, col_p2 = st.columns(2)
         total_parcelas = col_p2.number_input("Quantidade Total de Parcelas *", min_value=2, value=2)
         parcela_atual = col_p1.number_input("Qual parcela é essa? *", min_value=1, value=1)
-        valor_parcela = valor_total_compra / total_parcelas if total_parcelas > 0 else 0
-        st.info(f"O valor de cada parcela será: **R$ {valor_parcela:.2f}** (Este é o valor que aparecerá no relatório mensal)")
         
     recorrente = st.checkbox("Compra recorrente mensal (Fixo)?")
     
@@ -270,10 +256,8 @@ with aba_add_manual:
             }
             supabase.table("gastos").insert(novo_gasto).execute()
             
-            # Limpa os campos da tela deletando eles da memória antes de atualizar
-            for key in ['g_desc', 'g_val_vista', 'g_val_parc', 'g_cat_nova']:
-                if key in st.session_state:
-                    del st.session_state[key]
+            for key in ['g_desc', 'g_val_vista', 'g_val_parc_tot', 'g_val_parc_mensal', 'g_cat_nova']:
+                if key in st.session_state: del st.session_state[key]
                     
             st.success("Gasto salvo com sucesso!")
             st.rerun()
@@ -294,24 +278,15 @@ with aba_renda:
             }).execute()
             st.success("Salário cadastrado!")
             st.rerun()
-
     st.divider()
-    
     if not df_rendas.empty:
         st.write("### ✏️ Edição de Salários")
-        
         df_r_exib = df_rendas[['id', 'mes_referencia', 'usuario', 'valor']].copy()
         df_r_exib['mes_referencia'] = df_r_exib['mes_referencia'].dt.date
-        
         edit_renda = st.data_editor(
             df_r_exib, key="editor_rendas", num_rows="dynamic", use_container_width=True,
-            column_config={
-                "id": None, "mes_referencia": st.column_config.DateColumn("Data"),
-                "usuario": st.column_config.TextColumn("Pessoa"),
-                "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f")
-            }, hide_index=True
+            column_config={"id": None, "mes_referencia": st.column_config.DateColumn("Data"), "usuario": st.column_config.TextColumn("Pessoa"), "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f")}, hide_index=True
         )
-        
         if st.button("Salvar Alterações de Salário"):
             alt_r = st.session_state.editor_rendas
             fez_algo_r = False
@@ -325,44 +300,109 @@ with aba_renda:
                     id_upd = df_r_exib.iloc[idx]['id']
                     supabase.table("receitas").update(mudancas).eq("id", int(id_upd)).execute()
                 fez_algo_r = True
-                
             if fez_algo_r:
                 st.success("Salários atualizados!")
                 st.rerun()
 
 # ------------------------------------------
-# ABA 4: IMPORTAR FATURA (PDF)
+# ABA 4: IMPORTAR FATURA (PDF COM VALIDAÇÃO)
 # ------------------------------------------
 with aba_pdf:
-    st.subheader("Importar Fatura")
-    dono_fatura = st.radio("Essa fatura é de quem?", OPCOES_COMPRADOR, key="dono_fat")
-    data_fatura = st.date_input("Data base dessa fatura", value=date.today())
-    arquivo_pdf = st.file_uploader("Escolha o arquivo PDF", type=["pdf"])
-    
-    if arquivo_pdf is not None and st.button("Analisar Fatura"):
-        with st.spinner("Lendo sua fatura..."):
-            leitor = PyPDF2.PdfReader(arquivo_pdf)
-            texto_fatura = "".join([p.extract_text() for p in leitor.pages])
-            prompt = f"""
-            Leia a fatura de cartão. Extraia apenas as compras realizadas.
-            Retorne APENAS um array JSON válido. Cada objeto deve ter:
-            "descricao", "valor", "categoria", "parcela_atual", "total_parcelas".
-            Fatura: {texto_fatura}
-            """
-            try:
-                resposta_ia = modelo_ia.generate_content(prompt)
-                texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
-                compras = json.loads(texto_json)
-                for c in compras:
-                    supabase.table("gastos").insert({
-                        "conta_id": CONTA_ID, "descricao": c["descricao"],
-                        "valor": c["valor"], 
-                        "valor_total": c["valor"], 
-                        "categoria": c["categoria"], "comprador": dono_fatura,
-                        "data_compra": data_fatura.isoformat(), "recorrente": False,
-                        "parcela_atual": c.get("parcela_atual", 1), "total_parcelas": c.get("total_parcelas", 1)
-                    }).execute()
-                st.success(f"{len(compras)} compras salvas!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao processar: {e}")
+    # Se NÃO houver fatura em revisão, mostra o botão de upload
+    if 'fatura_em_revisao' not in st.session_state:
+        st.subheader("Importar Fatura")
+        dono_fatura = st.radio("Essa fatura é de quem?", OPCOES_COMPRADOR, key="dono_fat")
+        data_fatura = st.date_input("Data base dessa fatura", value=date.today())
+        arquivo_pdf = st.file_uploader("Escolha o arquivo PDF", type=["pdf"])
+        
+        if arquivo_pdf is not None and st.button("Analisar Fatura"):
+            with st.spinner("Lendo sua fatura e separando as compras... Isso pode levar alguns segundos."):
+                leitor = PyPDF2.PdfReader(arquivo_pdf)
+                texto_fatura = "".join([p.extract_text() for p in leitor.pages])
+                prompt = f"""
+                Leia a fatura de cartão. Extraia APENAS as compras realizadas.
+                Retorne APENAS um array JSON válido (sem formatação ou texto antes/depois). 
+                Cada objeto deve ter obrigatoriamente:
+                "descricao" (string), 
+                "valor" (numero decimal, referente à parcela cobrada no mês. Use ponto, não vírgula), 
+                "valor_total" (numero decimal, referente ao valor total cheio da compra se informado. Se não tiver, coloque igual ao "valor"), 
+                "categoria" (string genérica, ex: Comida, Transporte, Roupas, etc), 
+                "parcela_atual" (inteiro, 1 se for à vista), 
+                "total_parcelas" (inteiro, 1 se for à vista).
+                Fatura: {texto_fatura}
+                """
+                try:
+                    resposta_ia = modelo_ia.generate_content(prompt)
+                    texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
+                    compras_extraidas = json.loads(texto_json)
+                    
+                    # Salva temporariamente para revisão na tela
+                    st.session_state['fatura_em_revisao'] = compras_extraidas
+                    st.session_state['fatura_dono'] = dono_fatura
+                    st.session_state['fatura_data'] = data_fatura
+                    st.rerun()
+                except Exception as e:
+                    st.error("Ocorreu um erro ao ler o PDF. Tente novamente ou verifique se o arquivo está legível.")
+                    st.error(f"Erro técnico: {e}")
+                    
+    # Se HOUVER uma fatura lida, mostra a TELA DE VALIDAÇÃO
+    else:
+        st.subheader("🔍 Validação da Fatura")
+        st.write("A Inteligência Artificial encontrou os gastos abaixo. **Valide as informações, altere categorias, ajuste os valores ou exclua (selecionando a linha e apertando Delete) o que não quiser salvar.**")
+        
+        # Converte a lista extraída em DataFrame para exibir na tabela editável
+        df_rev = pd.DataFrame(st.session_state['fatura_em_revisao'])
+        
+        # Garante que as colunas existam para não dar erro
+        colunas_necessarias = ['descricao', 'valor', 'valor_total', 'categoria', 'parcela_atual', 'total_parcelas']
+        for col in colunas_necessarias:
+            if col not in df_rev.columns:
+                df_rev[col] = 1 if 'parcela' in col else (0.0 if 'valor' in col else "")
+                
+        fatura_editada = st.data_editor(
+            df_rev, 
+            key="editor_fatura", 
+            use_container_width=True, 
+            num_rows="dynamic",
+            column_config={
+                "descricao": st.column_config.TextColumn("Descrição da Compra"),
+                "valor": st.column_config.NumberColumn("Valor PARCELA (R$)", format="%.2f"),
+                "valor_total": st.column_config.NumberColumn("Valor TOTAL (R$)", format="%.2f"),
+                "categoria": st.column_config.TextColumn("Categoria"),
+                "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
+                "total_parcelas": st.column_config.NumberColumn("Total Parcelas", min_value=1),
+            }, 
+            hide_index=True
+        )
+        
+        st.divider()
+        col_btn1, col_btn2 = st.columns(2)
+        
+        if col_btn1.button("✅ Confirmar e Salvar no Sistema", type="primary"):
+            compras_finais = fatura_editada.to_dict('records')
+            for c in compras_finais:
+                supabase.table("gastos").insert({
+                    "conta_id": CONTA_ID,
+                    "descricao": c["descricao"],
+                    "valor": float(c["valor"]), 
+                    "valor_total": float(c.get("valor_total", c["valor"])), 
+                    "categoria": c["categoria"], 
+                    "comprador": st.session_state['fatura_dono'],
+                    "data_compra": st.session_state['fatura_data'].isoformat(),
+                    "recorrente": False,
+                    "parcela_atual": int(c.get("parcela_atual", 1)),
+                    "total_parcelas": int(c.get("total_parcelas", 1))
+                }).execute()
+            
+            # Limpa a memória para permitir nova leitura
+            del st.session_state['fatura_em_revisao']
+            del st.session_state['fatura_dono']
+            del st.session_state['fatura_data']
+            st.success("Todas as compras validadas foram salvas com sucesso!")
+            st.rerun()
+            
+        if col_btn2.button("❌ Cancelar Importação"):
+            del st.session_state['fatura_em_revisao']
+            del st.session_state['fatura_dono']
+            del st.session_state['fatura_data']
+            st.rerun()
