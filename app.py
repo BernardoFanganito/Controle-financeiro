@@ -3,7 +3,7 @@ import google.generativeai as genai
 from supabase import create_client
 import json
 import pandas as pd
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
 # ==========================================
 # CONFIGURAÇÕES INICIAIS E CSS
@@ -103,7 +103,6 @@ if st.session_state.get('conta_id') is None:
         nova_senha = st.text_input("Crie uma Senha", type="password")
         nome_1 = st.text_input("Seu Nome (Pessoa 1)")
         nome_2 = st.text_input("Nome do Parceiro(a) (Pessoa 2)") if tipo_conta == "Em Casal" else ""
-        
         if st.button("Criar Conta"):
             if not novo_usuario or not nova_senha or not nome_1:
                 st.warning("Preencha os campos obrigatórios!")
@@ -151,48 +150,47 @@ resp_cartoes = supabase.table("cartoes").select("*").eq("conta_id", CONTA_ID).ex
 df_gastos = pd.DataFrame(resp_gastos.data) if resp_gastos.data else pd.DataFrame()
 df_rendas = pd.DataFrame(resp_rendas.data) if resp_rendas.data else pd.DataFrame()
 
-# INICIALIZA CATEGORIAS PADRÃO SE VAZIO
+# INICIALIZA CATEGORIAS E CARTÕES
 if not resp_categorias.data:
-    padroes_cat = ["Alimentação/Mercado", "Apartamento", "Carro", "Casa/Doméstico", "Compras Gerais", "Compras Online", "Entretenimento", "Farmácia", "Lazer", "Serviços", "Transporte"]
-    for p in padroes_cat:
+    for p in ["Alimentação/Mercado", "Casa/Doméstico", "Compras Gerais", "Lazer"]:
         supabase.table("categorias").insert({"conta_id": CONTA_ID, "nome": p}).execute()
     resp_categorias = supabase.table("categorias").select("*").eq("conta_id", CONTA_ID).execute()
 
 df_categorias = pd.DataFrame(resp_categorias.data)
 categorias_banco = df_categorias['nome'].tolist() if not df_categorias.empty else ["Compras Gerais"]
 
-# INICIALIZA CARTÕES PADRÃO SE VAZIO
 if not resp_cartoes.data:
-    padroes_cart = ["Santander", "Itaú", "Bradesco", "Nubank"]
-    for c in padroes_cart:
+    for c in ["Santander", "Itaú", "Nubank"]:
         supabase.table("cartoes").insert({"conta_id": CONTA_ID, "nome": c}).execute()
     resp_cartoes = supabase.table("cartoes").select("*").eq("conta_id", CONTA_ID).execute()
 
 df_cartoes = pd.DataFrame(resp_cartoes.data)
 cartoes_banco = ["Nenhum"] + (df_cartoes['nome'].tolist() if not df_cartoes.empty else [])
 
-# SANITIZAÇÃO DE DADOS (Garante que nenhuma categoria ou campo fique NULO)
+# SANITIZAÇÃO DE DADOS 
 if not df_gastos.empty:
     df_gastos['categoria'] = df_gastos['categoria'].fillna("Compras Gerais").replace("", "Compras Gerais")
     df_gastos['comprador'] = df_gastos['comprador'].fillna(NOME_USUARIO_1)
     df_gastos['forma_pagamento'] = df_gastos['forma_pagamento'].fillna("Cartão de Crédito")
     df_gastos['cartao'] = df_gastos['cartao'].fillna("Nenhum")
-    df_gastos['status_pagamento'] = df_gastos['status_pagamento'].fillna("Pendente")
+    df_gastos['lote_importacao'] = df_gastos.get('lote_importacao', pd.Series(dtype='str')).fillna("")
     
-    # Adiciona à lista de categorias qualquer uma que exista nos lançamentos mas não na tabela de categorias
-    for c_exist in df_gastos['categoria'].unique():
-        if c_exist not in categorias_banco:
-            categorias_banco.append(c_exist)
-
     df_gastos['data_compra'] = pd.to_datetime(df_gastos['data_compra'])
     df_gastos['mes_ano'] = df_gastos['data_compra'].dt.strftime('%Y-%m')
+    
+    # Tratamento da Data de Vencimento
+    df_gastos['data_vencimento'] = pd.to_datetime(df_gastos.get('data_vencimento', df_gastos['data_compra']), errors='coerce')
+    df_gastos['data_vencimento'] = df_gastos['data_vencimento'].fillna(df_gastos['data_compra'])
+    
+    for c_exist in df_gastos['categoria'].unique():
+        if c_exist not in categorias_banco: categorias_banco.append(c_exist)
 
 if not df_rendas.empty:
     df_rendas['mes_referencia'] = pd.to_datetime(df_rendas['mes_referencia'])
     df_rendas['mes_ano'] = df_rendas['mes_referencia'].dt.strftime('%Y-%m')
 
 # ------------------------------------------
-# ABA 1: DASHBOARD (Filtros Avançados e Totais)
+# ABA 1: DASHBOARD E HISTÓRICO
 # ------------------------------------------
 with aba_dashboard:
     st.subheader("🔍 Filtros de Visualização")
@@ -201,29 +199,33 @@ with aba_dashboard:
     visao = col_f1.selectbox("De quem é a visão?", ["Visão Geral (Casal)", NOME_USUARIO_1, NOME_USUARIO_2] if MODO_CASAL else [NOME_USUARIO_1])
     
     if not df_gastos.empty:
-        meses_disp = sorted(df_gastos['mes_ano'].unique().tolist(), reverse=True)
-        filtro_mes = col_f2.selectbox("Mês de Referência", ["Todos"] + meses_disp)
+        # FILTRO DE FATURA E DATA
+        lotes_disp = [l for l in df_gastos['lote_importacao'].unique().tolist() if str(l).strip() != ""]
+        filtro_lote = col_f2.selectbox("Filtrar por Fatura Exata", ["Todas"] + lotes_disp)
         
-        filtro_cat = col_f3.selectbox("Filtrar por Categoria", ["Todas"] + categorias_banco)
-        filtro_forma = col_f4.selectbox("Forma de Pagamento / Cartão", ["Todos"] + ["Pix", "Débito", "Boleto", "Cartão de Crédito"] + [f"Cartão {c}" for c in cartoes_banco if c != "Nenhum"])
-
-        col_f5, col_f6 = st.columns(2)
-        filtro_status = col_f5.selectbox("Status do Pagamento", ["Todos", "Pago", "Pendente"])
-        usar_dia = col_f6.checkbox("Filtrar por um dia específico?")
-        filtro_dia = col_f6.date_input("Escolha o dia") if usar_dia else None
+        meses_disp = sorted(df_gastos['mes_ano'].unique().tolist(), reverse=True)
+        filtro_mes = col_f3.selectbox("Filtrar por Mês (Data da Compra)", ["Todos"] + meses_disp)
+        filtro_cat = col_f4.selectbox("Filtrar por Categoria", ["Todas"] + categorias_banco)
+        
+        col_f5, col_f6, col_f7 = st.columns(3)
+        filtro_forma = col_f5.selectbox("Forma de Pagamento", ["Todos", "Pix", "Débito", "Boleto", "Cartão de Crédito"] + [f"Cartão {c}" for c in cartoes_banco if c != "Nenhum"])
+        
+        # SISTEMA DE ORDENAÇÃO FORÇADA
+        ordenacao = col_f7.selectbox("Ordenar Tabela por:", [
+            "Data da Compra (Mais recente)", "Data da Compra (Mais antiga)", 
+            "Data de Vencimento (Mais próxima)", "Valor (Maior primeiro)", "Valor (Menor primeiro)"
+        ])
         
         # APLICAÇÃO DOS FILTROS
         df_filtrado = df_gastos.copy()
         
+        if filtro_lote != "Todas": df_filtrado = df_filtrado[df_filtrado['lote_importacao'] == filtro_lote]
         if filtro_mes != "Todos": df_filtrado = df_filtrado[df_filtrado['mes_ano'] == filtro_mes]
-        if usar_dia and filtro_dia: df_filtrado = df_filtrado[df_filtrado['data_compra'].dt.date == filtro_dia]
         if filtro_cat != "Todas": df_filtrado = df_filtrado[df_filtrado['categoria'] == filtro_cat]
-        if filtro_status != "Todos": df_filtrado = df_filtrado[df_filtrado['status_pagamento'] == filtro_status]
         
         if filtro_forma != "Todos":
             if filtro_forma.startswith("Cartão "):
-                nome_c = filtro_forma.replace("Cartão ", "")
-                df_filtrado = df_filtrado[(df_filtrado['forma_pagamento'] == "Cartão de Crédito") & (df_filtrado['cartao'] == nome_c)]
+                df_filtrado = df_filtrado[(df_filtrado['forma_pagamento'] == "Cartão de Crédito") & (df_filtrado['cartao'] == filtro_forma.replace("Cartão ", ""))]
             else:
                 df_filtrado = df_filtrado[df_filtrado['forma_pagamento'] == filtro_forma]
             
@@ -232,6 +234,13 @@ with aba_dashboard:
             df_juntos = df_filtrado[df_filtrado['comprador'] == "Juntos (Dividido 50/50)"].copy()
             df_juntos['valor'] = df_juntos['valor'] / 2 
             df_filtrado = pd.concat([df_indiv, df_juntos])
+
+        # APLICA A ORDENAÇÃO SELECIONADA
+        if ordenacao == "Data da Compra (Mais recente)": df_filtrado = df_filtrado.sort_values(by="data_compra", ascending=False)
+        elif ordenacao == "Data da Compra (Mais antiga)": df_filtrado = df_filtrado.sort_values(by="data_compra", ascending=True)
+        elif ordenacao == "Data de Vencimento (Mais próxima)": df_filtrado = df_filtrado.sort_values(by="data_vencimento", ascending=True)
+        elif ordenacao == "Valor (Maior primeiro)": df_filtrado = df_filtrado.sort_values(by="valor", ascending=False)
+        elif ordenacao == "Valor (Menor primeiro)": df_filtrado = df_filtrado.sort_values(by="valor", ascending=True)
 
         total_gasto = df_filtrado['valor'].sum()
         
@@ -254,47 +263,32 @@ with aba_dashboard:
             c3.metric("Saldo Sobrando", formatar_moeda(saldo), delta=delta_str)
         st.divider()
 
-        col_graf1, col_graf2 = st.columns(2)
-        with col_graf1:
-            st.write("### 📈 Gastos no Período")
-            if not df_filtrado.empty:
-                graf_tempo = df_filtrado.groupby('data_compra', as_index=False)['valor'].sum()
-                st.bar_chart(graf_tempo, x="data_compra", y="valor")
-        with col_graf2:
-            st.write("### 🍕 Gastos por Categoria")
-            if not df_filtrado.empty:
-                graf_cat = df_filtrado.groupby('categoria', as_index=False)['valor'].sum()
-                st.bar_chart(graf_cat, x="categoria", y="valor")
-
-        # TABELA DE HISTÓRICO COM RESUMO DE SOMA TOTAL
+        # TABELA DE HISTÓRICO COM VENCIMENTO E LOTE
         st.write("### ✏️ Histórico de Lançamentos")
         st.info(f"💡 **Total dos Lançamentos Exibidos na Tabela Abaixo:** **{formatar_moeda(total_gasto)}**")
-        st.caption("*(Para ordenar, clique no título de qualquer coluna. Para excluir, marque a linha e aperte 'Delete')*")
         
-        df_exibicao = df_filtrado[['id', 'data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'forma_pagamento', 'cartao', 'status_pagamento', 'parcela_atual', 'total_parcelas']].copy()
+        df_exibicao = df_filtrado[['id', 'data_compra', 'data_vencimento', 'descricao', 'valor', 'categoria', 'comprador', 'forma_pagamento', 'cartao', 'lote_importacao']].copy()
         df_exibicao['data_compra'] = df_exibicao['data_compra'].dt.date
+        df_exibicao['data_vencimento'] = df_exibicao['data_vencimento'].dt.date
         df_exibicao['valor'] = df_exibicao['valor'].apply(apenas_numero_br)
-        df_exibicao['valor_total'] = df_exibicao['valor_total'].apply(apenas_numero_br)
         
         editado = st.data_editor(
             df_exibicao, key="editor_gastos", use_container_width=True, num_rows="dynamic",
             column_config={
                 "id": None, 
-                "data_compra": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                "data_compra": st.column_config.DateColumn("Data Compra", format="DD/MM/YYYY"),
+                "data_vencimento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição"),
-                "valor": st.column_config.TextColumn("Valor Parcela (R$)"), 
-                "valor_total": st.column_config.TextColumn("Total Compra (R$)"),
+                "valor": st.column_config.TextColumn("Valor (R$)"), 
                 "categoria": st.column_config.SelectboxColumn("Categoria", options=categorias_banco, required=True),
                 "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
                 "forma_pagamento": st.column_config.SelectboxColumn("Pagamento", options=["Cartão de Crédito", "Pix", "Débito", "Boleto"], required=True),
                 "cartao": st.column_config.SelectboxColumn("Cartão", options=cartoes_banco, required=True),
-                "status_pagamento": st.column_config.SelectboxColumn("Status", options=["Pago", "Pendente"], required=True),
-                "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
-                "total_parcelas": st.column_config.NumberColumn("Total", min_value=1)
+                "lote_importacao": st.column_config.TextColumn("ID da Fatura", disabled=True)
             }, hide_index=True
         )
 
-        if st.button("Salvar Alterações/Exclusões"):
+        if st.button("Salvar Alterações/Exclusões da Tabela"):
             alteracoes = st.session_state.editor_gastos
             fez_algo = False
             if alteracoes.get("deleted_rows"):
@@ -306,8 +300,8 @@ with aba_dashboard:
                 for row_idx, mudancas in alteracoes["edited_rows"].items():
                     id_editar = df_exibicao.iloc[row_idx]['id']
                     if 'data_compra' in mudancas: mudancas['data_compra'] = mudancas['data_compra'] + "T00:00:00"
+                    if 'data_vencimento' in mudancas: mudancas['data_vencimento'] = mudancas['data_vencimento'] + "T00:00:00"
                     if 'valor' in mudancas: mudancas['valor'] = texto_para_float(mudancas['valor'])
-                    if 'valor_total' in mudancas: mudancas['valor_total'] = texto_para_float(mudancas['valor_total'])
                     supabase.table("gastos").update(mudancas).eq("id", int(id_editar)).execute()
                 fez_algo = True
             if fez_algo:
@@ -323,19 +317,19 @@ with aba_add_manual:
     st.subheader("Registrar Nova Compra")
     
     desc = st.text_input("O que foi comprado? *", key="g_desc")
-    data_compra = st.date_input("Data da Compra *", value=date.today())
+    col_d1, col_d2 = st.columns(2)
+    data_compra = col_d1.date_input("Data da Compra *", value=date.today())
+    # VENCIMENTO MANUAL
+    data_vencimento = col_d2.date_input("Data de Vencimento / Pagamento *", value=data_compra, help="Para cartão, coloque o dia que a fatura vence.")
+    
     comprador = st.radio("De quem é essa conta? *", OPCOES_COMPRADOR)
     cat_selecionada = st.selectbox("Categoria *", categorias_banco)
     
     col_pag1, col_pag2 = st.columns(2)
     forma_pag = col_pag1.selectbox("Forma de Pagamento *", ["Cartão de Crédito", "Pix", "Débito", "Boleto"])
-    
     cartao_selecionado = "Nenhum"
-    status_inicial = "Pago"
-    
     if forma_pag == "Cartão de Crédito":
         cartao_selecionado = col_pag2.selectbox("Qual Cartão de Crédito?", [c for c in cartoes_banco if c != "Nenhum"])
-        status_inicial = col_pag2.radio("Status do Pagamento:", ["Pendente (Vence dia 1º)", "Pago"], index=0)
     
     tipo_pagamento = st.radio("Modalidade:", ["À vista", "Parcelada"])
     
@@ -351,11 +345,9 @@ with aba_add_manual:
         valor_total_compra = texto_para_float(val_tot_txt)
         val_parc_txt = col_vp.text_input("Valor da PARCELA Mensal (R$) *", value="0,00", key="g_val_parc_mensal")
         valor_parcela = texto_para_float(val_parc_txt)
-        
         col_p1, col_p2 = st.columns(2)
         total_parcelas = col_p2.number_input("Quantidade Total de Parcelas *", min_value=2, value=2)
         parcela_atual = col_p1.number_input("Qual parcela é essa? *", min_value=1, value=1)
-        st.info(f"O valor de cada parcela será: **{formatar_moeda(valor_parcela)}**")
         
     recorrente = st.checkbox("Compra recorrente mensal (Fixo)?")
     
@@ -367,13 +359,11 @@ with aba_add_manual:
                 "conta_id": CONTA_ID, "descricao": desc,
                 "valor": float(valor_parcela), "valor_total": float(valor_total_compra),
                 "categoria": cat_selecionada, "comprador": comprador,
-                "data_compra": data_compra.isoformat(), "recorrente": recorrente,
-                "parcela_atual": int(parcela_atual), "total_parcelas": int(total_parcelas),
-                "forma_pagamento": forma_pag, "cartao": cartao_selecionado,
-                "status_pagamento": "Pago" if forma_pag != "Cartão de Crédito" else status_inicial
+                "data_compra": data_compra.isoformat(), "data_vencimento": data_vencimento.isoformat(),
+                "recorrente": recorrente, "parcela_atual": int(parcela_atual), "total_parcelas": int(total_parcelas),
+                "forma_pagamento": forma_pag, "cartao": cartao_selecionado
             }
             supabase.table("gastos").insert(novo_gasto).execute()
-            
             for key in ['g_desc', 'g_val_vista', 'g_val_parc_tot', 'g_val_parc_mensal']:
                 if key in st.session_state: del st.session_state[key]
             st.success("Gasto salvo com sucesso!")
@@ -389,7 +379,6 @@ with aba_renda:
         mes_renda = st.date_input("Data do Recebimento", value=date.today())
         valor_renda_txt = st.text_input("Valor Recebido (R$)", value="0,00")
         valor_renda = texto_para_float(valor_renda_txt)
-        
         if st.form_submit_button("Salvar Salário") and valor_renda > 0:
             supabase.table("receitas").insert({
                 "conta_id": CONTA_ID, "usuario": usuario_renda,
@@ -404,15 +393,9 @@ with aba_renda:
         df_r_exib = df_rendas[['id', 'mes_referencia', 'usuario', 'valor']].copy()
         df_r_exib['mes_referencia'] = df_r_exib['mes_referencia'].dt.date
         df_r_exib['valor'] = df_r_exib['valor'].apply(apenas_numero_br)
-        
         edit_renda = st.data_editor(
             df_r_exib, key="editor_rendas", num_rows="dynamic", use_container_width=True,
-            column_config={
-                "id": None, 
-                "mes_referencia": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), 
-                "usuario": st.column_config.SelectboxColumn("Pessoa", options=OPCOES_COMPRADOR[:2], required=True), 
-                "valor": st.column_config.TextColumn("Valor (R$)") 
-            }, hide_index=True
+            column_config={"id": None, "mes_referencia": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), "usuario": st.column_config.SelectboxColumn("Pessoa", options=OPCOES_COMPRADOR[:2], required=True), "valor": st.column_config.TextColumn("Valor (R$)")}, hide_index=True
         )
         if st.button("Salvar Alterações de Salário"):
             alt_r = st.session_state.editor_rendas
@@ -429,36 +412,34 @@ with aba_renda:
                     if 'valor' in mudancas: mudancas['valor'] = texto_para_float(mudancas['valor'])
                     supabase.table("receitas").update(mudancas).eq("id", int(id_upd)).execute()
                 fez_algo_r = True
-            if fez_algo_r:
-                st.success("Salários atualizados!")
-                st.rerun()
+            if fez_algo_r: st.rerun()
 
 # ------------------------------------------
-# ABA 4: IMPORTAR FATURA (Com Seleção de Cartão)
+# ABA 4: IMPORTAR FATURA
 # ------------------------------------------
 with aba_pdf:
     if 'fatura_em_revisao' not in st.session_state:
         st.subheader("Importar Fatura de Cartão")
         col_pdf1, col_pdf2 = st.columns(2)
         dono_fatura = col_pdf1.radio("Essa fatura é de quem?", OPCOES_COMPRADOR, key="dono_fat")
+        
+        # O NOME DA FATURA INTELIGENTE SAI DAQUI
         cartao_fatura = col_pdf2.selectbox("Qual Cartão de Crédito é este?", [c for c in cartoes_banco if c != "Nenhum"])
-        data_fatura = col_pdf2.date_input("Data base dessa fatura", value=date.today())
+        vencimento_fatura = col_pdf2.date_input("Data de Vencimento desta Fatura", value=date.today())
         
         arquivo_pdf = st.file_uploader("Escolha o arquivo PDF", type=["pdf"])
         
         if arquivo_pdf is not None and st.button("Analisar Fatura"):
-            with st.spinner("A IA está analisando a fatura e categorizando tudo..."):
+            with st.spinner("A IA está analisando a fatura e extraindo as compras..."):
                 try:
                     pdf_bytes = arquivo_pdf.getvalue()
                     prompt = f"""
-                    Leia a fatura de cartão anexada. Extraia APENAS as compras realizadas.
-                    Ignore pagamentos de fatura, estornos, saldos anteriores ou encargos.
+                    Leia a fatura anexada. Extraia APENAS as compras realizadas. Ignore pagamentos de fatura ou saldos.
                     Retorne EXCLUSIVAMENTE um array JSON. Cada objeto deve conter:
                     - "data_compra": (string, formato YYYY-MM-DD)
-                    - "descricao": (string, nome do estabelecimento)
+                    - "descricao": (string)
                     - "valor": (numero decimal, parcela do mês)
-                    - "valor_total": (numero decimal, total da compra)
-                    - "categoria": (string, tente usar uma destas se fizer sentido: {', '.join(categorias_banco)})
+                    - "categoria": (string, tente usar: {', '.join(categorias_banco)})
                     - "parcela_atual": (inteiro)
                     - "total_parcelas": (inteiro)
                     """
@@ -473,10 +454,7 @@ with aba_pdf:
                         except Exception as err:
                             ultimo_erro = err
                             continue
-                            
-                    if not resposta_ia or not resposta_ia.text:
-                        raise ultimo_erro if ultimo_erro else Exception("Nenhum modelo respondeu.")
-
+                    if not resposta_ia or not resposta_ia.text: raise ultimo_erro if ultimo_erro else Exception("Nenhum modelo respondeu.")
                     texto_json = resposta_ia.text.strip().removeprefix('```json').removesuffix('```').strip()
                     compras_extraidas = json.loads(texto_json)
                     
@@ -484,27 +462,25 @@ with aba_pdf:
                         c['comprador'] = dono_fatura
                         c['cartao'] = cartao_fatura
                         c['forma_pagamento'] = "Cartão de Crédito"
-                        c['status_pagamento'] = "Pendente"
                         if not c.get("categoria"): c["categoria"] = "Compras Gerais"
-                        if not c.get("data_compra"): c["data_compra"] = data_fatura.isoformat()
+                        if not c.get("data_compra"): c["data_compra"] = vencimento_fatura.isoformat()
                     
                     st.session_state['fatura_em_revisao'] = compras_extraidas
-                    st.session_state['fatura_data_base'] = data_fatura
+                    st.session_state['fatura_vencimento'] = vencimento_fatura
+                    st.session_state['fatura_cartao'] = cartao_fatura
                     st.rerun()
                 except Exception as e:
-                    st.error("Erro na leitura. Certifique-se de que é um PDF válido.")
-                    st.error(f"Erro técnico: {e}")
+                    st.error(f"Erro na leitura: {e}")
                     
         st.divider()
         st.subheader("🗑️ Desfazer Importações Recentes")
         if not df_gastos.empty and 'lote_importacao' in df_gastos.columns:
-            df_com_lote = df_gastos[df_gastos['lote_importacao'].notna()]
+            df_com_lote = df_gastos[df_gastos['lote_importacao'].str.strip() != ""]
             if not df_com_lote.empty:
                 lotes_validos = df_com_lote['lote_importacao'].unique()
-                lote_selecionado = st.selectbox("Selecione o Lote da Fatura que quer apagar", lotes_validos)
+                lote_selecionado = st.selectbox("Selecione a Fatura que quer apagar", lotes_validos)
                 qtd_lote = len(df_com_lote[df_com_lote['lote_importacao'] == lote_selecionado])
                 st.write(f"Essa importação contém **{qtd_lote} lançamentos**.")
-                
                 if st.button("🚨 Excluir esta Fatura Inteira", type="primary"):
                     supabase.table("gastos").delete().eq("conta_id", CONTA_ID).eq("lote_importacao", lote_selecionado).execute()
                     st.success("Fatura desfeita com sucesso!")
@@ -512,43 +488,36 @@ with aba_pdf:
                     
     else:
         st.subheader("🔍 Validação da Fatura")
-        st.write("Dê dois cliques nas células para alterar informações, ajustar valores ou apagar linhas.")
+        st.write("Valide as categorias e compradores. Se alterar algo que se repete muito, use o botão Mágico de Padronizar!")
         
         df_rev = pd.DataFrame(st.session_state['fatura_em_revisao'])
         
-        col_nec = ['data_compra', 'descricao', 'valor', 'valor_total', 'categoria', 'comprador', 'cartao', 'parcela_atual', 'total_parcelas']
+        col_nec = ['data_compra', 'descricao', 'valor', 'categoria', 'comprador', 'cartao', 'parcela_atual', 'total_parcelas']
         for col in col_nec:
             if col not in df_rev.columns:
                 if 'parcela' in col: df_rev[col] = 1
                 elif 'valor' in col: df_rev[col] = 0.0
                 elif col == 'comprador': df_rev[col] = OPCOES_COMPRADOR[0]
                 elif col == 'categoria': df_rev[col] = "Compras Gerais"
-                elif col == 'cartao': df_rev[col] = cartoes_banco[1] if len(cartoes_banco) > 1 else "Nenhum"
-                elif col == 'data_compra': df_rev[col] = st.session_state['fatura_data_base']
+                elif col == 'cartao': df_rev[col] = st.session_state['fatura_cartao']
+                elif col == 'data_compra': df_rev[col] = st.session_state['fatura_vencimento']
                 else: df_rev[col] = ""
                 
         df_rev['data_compra'] = pd.to_datetime(df_rev['data_compra'], errors='coerce').dt.date
-        df_rev['data_compra'] = df_rev['data_compra'].fillna(st.session_state['fatura_data_base'])
-        
+        df_rev['data_compra'] = df_rev['data_compra'].fillna(st.session_state['fatura_vencimento'])
         df_rev['valor'] = df_rev['valor'].apply(apenas_numero_br)
-        df_rev['valor_total'] = df_rev['valor_total'].apply(apenas_numero_br)
         
-        opcoes_cat_fatura = categorias_banco.copy()
-        for cat in df_rev['categoria'].dropna().unique():
-            if cat not in opcoes_cat_fatura and cat != "": opcoes_cat_fatura.append(cat)
-                
         fatura_editada = st.data_editor(
             df_rev, key="editor_fatura", use_container_width=True, num_rows="dynamic",
             column_config={
                 "data_compra": st.column_config.DateColumn("Data da Compra", format="DD/MM/YYYY"),
                 "descricao": st.column_config.TextColumn("Descrição da Compra"),
                 "valor": st.column_config.TextColumn("Valor PARCELA (R$)"),
-                "valor_total": st.column_config.TextColumn("Valor TOTAL (R$)"),
-                "categoria": st.column_config.SelectboxColumn("Categoria", options=opcoes_cat_fatura, required=True),
-                "comprador": st.column_config.SelectboxColumn("De quem é?", options=OPCOES_COMPRADOR, required=True),
-                "cartao": st.column_config.SelectboxColumn("Cartão", options=[c for c in cartoes_banco if c != "Nenhum"], required=True),
-                "parcela_atual": st.column_config.NumberColumn("Parcela Nº", min_value=1),
-                "total_parcelas": st.column_config.NumberColumn("Total Parcelas", min_value=1),
+                "categoria": st.column_config.SelectboxColumn("Categoria", options=categorias_banco, required=True),
+                "comprador": st.column_config.SelectboxColumn("De quem é a conta?", options=OPCOES_COMPRADOR, required=True),
+                "cartao": st.column_config.TextColumn("Cartão", disabled=True),
+                "parcela_atual": st.column_config.NumberColumn("Parc. Nº", min_value=1),
+                "total_parcelas": st.column_config.NumberColumn("Total", min_value=1),
             }, hide_index=True
         )
         
@@ -557,40 +526,41 @@ with aba_pdf:
         
         if col_btn1.button("✅ Confirmar e Salvar Fatura", type="primary"):
             compras_finais = fatura_editada.to_dict('records')
-            lote_id = f"Fatura_{datetime.now().strftime('%d-%m-%Y_%H:%M:%S')}"
+            
+            # CRIAÇÃO DO NOME DO LOTE
+            nome_cartao = st.session_state['fatura_cartao']
+            venc_str = st.session_state['fatura_vencimento'].strftime('%d/%m/%Y')
+            lote_id = f"Fatura {nome_cartao} - Venc: {venc_str}"
             
             for c in compras_finais:
                 data_final = c["data_compra"].isoformat() if hasattr(c["data_compra"], 'isoformat') else str(c["data_compra"])
                 valor_p = texto_para_float(c["valor"])
-                valor_t = texto_para_float(c.get("valor_total", c["valor"]))
-                cat_f = c["categoria"] if c["categoria"] else "Compras Gerais"
                 
                 supabase.table("gastos").insert({
                     "conta_id": CONTA_ID, "descricao": c["descricao"],
-                    "valor": float(valor_p), "valor_total": float(valor_t), 
-                    "categoria": cat_f, "comprador": c["comprador"],
-                    "data_compra": data_final, "recorrente": False,
-                    "parcela_atual": int(c.get("parcela_atual", 1)), "total_parcelas": int(c.get("total_parcelas", 1)),
+                    "valor": float(valor_p), "valor_total": float(valor_p), # Assumimos igual na importação simples
+                    "categoria": c["categoria"], "comprador": c["comprador"],
+                    "data_compra": data_final, "data_vencimento": st.session_state['fatura_vencimento'].isoformat(),
+                    "recorrente": False, "parcela_atual": int(c.get("parcela_atual", 1)), "total_parcelas": int(c.get("total_parcelas", 1)),
                     "forma_pagamento": "Cartão de Crédito", "cartao": c["cartao"],
-                    "status_pagamento": "Pendente", "lote_importacao": lote_id
+                    "lote_importacao": lote_id
                 }).execute()
             
             del st.session_state['fatura_em_revisao']
-            del st.session_state['fatura_data_base']
+            del st.session_state['fatura_vencimento']
+            del st.session_state['fatura_cartao']
             st.success("Fatura salva com sucesso!")
             st.rerun()
             
         if col_btn2.button("🪄 Padronizar repetições"):
             alt_f = st.session_state.editor_fatura
             fatura_atual = st.session_state['fatura_em_revisao']
-            
             mapa_edicoes = {}
             if alt_f.get("edited_rows"):
                 for idx_str, mudancas in alt_f["edited_rows"].items():
                     if "categoria" in mudancas or "comprador" in mudancas:
                         desc = fatura_atual[int(idx_str)]["descricao"]
                         mapa_edicoes[desc] = mudancas
-                        
             if mapa_edicoes:
                 mudou_algo = False
                 for i, item in enumerate(fatura_atual):
@@ -603,7 +573,6 @@ with aba_pdf:
                         if "comprador" in mapa_edicoes[desc] and item.get("comprador") != mapa_edicoes[desc]["comprador"]:
                             item["comprador"] = mapa_edicoes[desc]["comprador"]
                             mudou_algo = True
-                            
                 if mudou_algo:
                     st.session_state['fatura_em_revisao'] = fatura_atual
                     del st.session_state["editor_fatura"]
@@ -613,7 +582,8 @@ with aba_pdf:
 
         if col_btn3.button("❌ Cancelar Importação"):
             del st.session_state['fatura_em_revisao']
-            del st.session_state['fatura_data_base']
+            del st.session_state['fatura_vencimento']
+            del st.session_state['fatura_cartao']
             st.rerun()
 
 # ------------------------------------------
@@ -621,8 +591,6 @@ with aba_pdf:
 # ------------------------------------------
 with aba_config:
     col_cfg1, col_cfg2 = st.columns(2)
-    
-    # SEÇÃO DE CATEGORIAS
     with col_cfg1:
         st.subheader("⚙️ Suas Categorias")
         with st.form("form_nova_cat", clear_on_submit=True):
@@ -632,7 +600,6 @@ with aba_config:
                     supabase.table("categorias").insert({"conta_id": CONTA_ID, "nome": nova_cat.strip()}).execute()
                     st.success("Categoria cadastrada!")
                     st.rerun()
-
         if not df_categorias.empty:
             df_cat_exib = df_categorias[['id', 'nome']].copy()
             edit_cat = st.data_editor(
@@ -654,7 +621,6 @@ with aba_config:
                     fez_algo = True
                 if fez_algo: st.rerun()
 
-    # SEÇÃO DE CARTÕES DE CRÉDITO
     with col_cfg2:
         st.subheader("💳 Seus Cartões de Crédito")
         with st.form("form_novo_cartao", clear_on_submit=True):
@@ -664,7 +630,6 @@ with aba_config:
                     supabase.table("cartoes").insert({"conta_id": CONTA_ID, "nome": novo_cartao.strip()}).execute()
                     st.success("Cartão cadastrado!")
                     st.rerun()
-
         if not df_cartoes.empty:
             df_cart_exib = df_cartoes[['id', 'nome']].copy()
             edit_cart = st.data_editor(
